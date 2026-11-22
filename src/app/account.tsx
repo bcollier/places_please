@@ -15,7 +15,7 @@ import {
   type AccountResult,
 } from '@/lib/account';
 import { confirmAction, showAlert } from '@/lib/dialogs';
-import { toUserMessage } from '@/lib/errors';
+import { AppError, toUserMessage } from '@/lib/errors';
 import { goBack, goHome } from '@/lib/navigation';
 import { useAuth } from '@/providers/auth-provider';
 import { useData } from '@/providers/data-provider';
@@ -53,7 +53,13 @@ function SaveAccount() {
     try {
       await finish(await fn());
     } catch (err) {
-      setError(toUserMessage(err));
+      if (err instanceof AppError && err.code === 'merge_pending') {
+        // Signed in; the copy finishes automatically later.
+        await refresh();
+        showAlert('Signed in', err.message, goBack);
+      } else {
+        setError(toUserMessage(err));
+      }
     } finally {
       setBusy(null);
     }

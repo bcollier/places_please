@@ -1,7 +1,8 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import * as api from '@/lib/api';
 import { toUserMessage } from '@/lib/errors';
+import { resumeGuestMerge } from '@/lib/guest-merge';
 import { loadLocalSnapshot, saveLocalSnapshot } from '@/lib/local-store';
 import { DEFAULT_SETTINGS, type Script, type Settings } from '@/lib/types';
 import { useAuth } from '@/providers/auth-provider';
@@ -35,20 +36,32 @@ export function DataProvider({ children }: { children: ReactNode }) {
   /** The user whose on-device copy has been loaded; nothing is written back before that. */
   const [hydratedUser, setHydratedUser] = useState<string | null>(null);
 
+  // The signed-in user right now. Requests started for an earlier user are ignored when they return,
+  // so a slow response from a previous account can never overwrite (or be saved as) the new one.
+  const userRef = useRef(userId);
+  const requestGeneration = useRef(0);
+  useEffect(() => {
+    userRef.current = userId;
+  }, [userId]);
+
   const refresh = useCallback(async () => {
-    if (!userId) return;
+    const forUser = userRef.current;
+    if (!forUser) return;
+    const generation = ++requestGeneration.current;
+    const isStale = () => generation !== requestGeneration.current || userRef.current !== forUser;
     try {
-      const [list, profile] = await Promise.all([api.listScripts(), api.getProfile(userId)]);
+      const [list, profile] = await Promise.all([api.listScripts(), api.getProfile(forUser)]);
+      if (isStale()) return;
       setError(null);
       setScripts(list);
       setSettings(profile.settings);
       setCurrentScriptId(profile.current_script_id);
     } catch (err) {
-      setError(toUserMessage(err));
+      if (!isStale()) setError(toUserMessage(err));
     } finally {
-      setLoading(false);
+      if (!isStale()) setLoading(false);
     }
-  }, [userId]);
+  }, []);
 
   // Launch: show the on-device copy (AsyncStorage) right away, then refresh from Supabase.
   useEffect(() => {
@@ -56,13 +69,16 @@ export function DataProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     void (async () => {
       const local = await loadLocalSnapshot(userId);
-      if (cancelled) return;
+      if (cancelled || userRef.current !== userId) return;
       setScripts(local?.scripts ?? []);
       setSettings(local?.settings ?? DEFAULT_SETTINGS);
       setCurrentScriptId(local?.currentScriptId ?? null);
       if (local) setLoading(false);
       setHydratedUser(userId);
       await refresh();
+      // Finish copying a guest's scripts into this account if an earlier attempt was interrupted.
+      const resumed = await resumeGuestMerge(userId);
+      if (resumed !== null && !cancelled) await refresh();
     })();
     return () => {
       cancelled = true;

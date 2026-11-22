@@ -37,14 +37,13 @@ function Listen({ scriptId, scene }: { scriptId: string; scene: string | null })
   const lines = useMemo(() => linesInScene(script.lines, scene), [script.lines, scene]);
   const listRef = useRef<FlatList<ScriptLine>>(null);
   const startedAt = useRef(new Date());
-  const maxIndex = useRef(0);
   const { save } = useSessionSaver();
 
   const [readsMine, setReadsMine] = useState(settings.listenReadsMyLines);
   const [rate, setRate] = useState(settings.speechRate);
 
-  const saveSession = () => {
-    if (maxIndex.current === 0) return;
+  const saveSession = (heard: number) => {
+    if (heard === 0) return;
     void save({
       script_id: script.id,
       mode: 'listen',
@@ -52,7 +51,7 @@ function Listen({ scriptId, scene }: { scriptId: string; scene: string | null })
       scene,
       started_at: startedAt.current,
       attempts: [],
-      lines_total: maxIndex.current + 1,
+      lines_total: heard,
     });
   };
 
@@ -63,20 +62,19 @@ function Listen({ scriptId, scene }: { scriptId: string; scene: string | null })
   useEffect(() => player.updateGenders(script.character_genders), [player, script.character_genders]);
   useGenderGuess(script);
   useEffect(() => {
-    if (state.phase === 'finished') saveSession();
+    if (state.phase === 'finished') saveSession(player.heardCount());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.phase]);
   useEffect(
     () => () => {
       void player.stop();
-      saveSession();
+      saveSession(player.heardCount());
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [player],
   );
 
   useEffect(() => {
-    maxIndex.current = Math.max(maxIndex.current, state.index);
     if (lines.length > 0) {
       listRef.current?.scrollToIndex({ index: Math.min(state.index, lines.length - 1), viewPosition: 0.3, animated: true });
     }

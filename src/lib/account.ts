@@ -1,6 +1,7 @@
 import type { AuthError, User } from '@supabase/supabase-js';
 
-import { exportGuestData, importGuestData, type GuestSnapshot } from '@/lib/api';
+import { exportGuestData, type GuestSnapshot } from '@/lib/api';
+import { startGuestMerge } from '@/lib/guest-merge';
 import { AppError } from '@/lib/errors';
 import { getSupabase } from '@/lib/supabase';
 
@@ -56,18 +57,21 @@ async function switchAccount(signIn: () => Promise<void>): Promise<AccountResult
 
   await signIn();
 
+  const { data: after } = await supabase.auth.getSession();
+  const newUserId = after.session?.user.id;
+  if (!newUserId) throw new AppError("Couldn't finish signing in. Please try again.");
+
   let mergedScripts = 0;
-  if (snapshot.scripts.length > 0 || snapshot.history.length > 0) {
-    try {
-      mergedScripts = await importGuestData(snapshot);
-    } catch (err) {
-      console.warn('[account] merge failed', err);
-      throw new AppError(
-        "You're signed in, but this phone's scripts couldn't be copied over. They're still saved under the old guest session.",
-        'merge_failed',
-        false,
-      );
-    }
+  try {
+    // Saved on the device first, so a failed copy resumes automatically (src/lib/guest-merge.ts).
+    mergedScripts = await startGuestMerge(newUserId, snapshot);
+  } catch (err) {
+    console.warn('[account] merge did not finish', err);
+    throw new AppError(
+      "You're signed in. This phone's scripts are still being copied to your account; the app will finish automatically the next time it connects.",
+      'merge_pending',
+      false,
+    );
   }
   if (guestToken) {
     // The guest's data now lives in the account; remove the leftover guest copy and login.

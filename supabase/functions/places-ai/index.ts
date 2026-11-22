@@ -16,7 +16,7 @@
 //   OPENROUTER_PARSE_MODELS         optional, comma separated, first is preferred
 //   OPENROUTER_TRANSCRIBE_MODELS    optional, comma separated
 //   DAILY_USER_LIMIT_USD            optional, default 3
-//   DAILY_TOTAL_LIMIT_USD           optional, default 10
+//   DAILY_TOTAL_LIMIT_USD           optional, default 10 (both caps are enforced atomically in the database)
 //   ALLOWED_EMAILS                  optional, comma separated. When set, only these signed-in emails can use
 //                                   the AI actions (like Ignatius at Home); guests and other accounts get 403.
 //   AZURE_SPEECH_KEY, AZURE_SPEECH_REGION   optional backup for the free Edge voices (e.g. region "eastus")
@@ -128,20 +128,16 @@ Deno.serve(async (req) => {
         return json({ data: await handleExtractText(body) });
       case 'parse_script':
         enforceAllowList(email);
-        await enforceSpendLimits(admin, userId);
-        return json({ data: await handleParseScript(body, { admin, userId, requestBytes }) });
+        return json({ data: await handleParseScript(body, { admin, userId, requestBytes, signal: req.signal }) });
       case 'transcribe':
         enforceAllowList(email);
-        await enforceSpendLimits(admin, userId);
-        return json({ data: await handleTranscribe(body, { admin, userId, requestBytes }) });
+        return json({ data: await handleTranscribe(body, { admin, userId, requestBytes, signal: req.signal }) });
       case 'guess_genders':
         enforceAllowList(email);
-        await enforceSpendLimits(admin, userId);
-        return json({ data: await handleGuessGenders(body, { admin, userId, requestBytes }) });
+        return json({ data: await handleGuessGenders(body, { admin, userId, requestBytes, signal: req.signal }) });
       case 'speak':
         enforceAllowList(email);
-        await enforceSpendLimits(admin, userId);
-        return json({ data: await handleSpeak(body, { admin, userId, requestBytes }) });
+        return json({ data: await handleSpeak(body, { admin, userId, requestBytes, signal: req.signal }) });
       case 'delete_account': {
         // The Supabase project is shared with other apps (Ignatius at Home), and an email login is
         // shared with them too. So: always delete this app's data; delete the login itself only for a
@@ -195,31 +191,6 @@ function enforceAllowList(email: string | null) {
       'not_allowed',
       'AI features are limited to approved accounts. Sign in with your email in Settings › Account.',
     );
-  }
-}
-
-async function enforceSpendLimits(admin: SupabaseClient, userId: string) {
-  const since = new Date();
-  since.setUTCHours(0, 0, 0, 0);
-  const { data, error } = await admin
-    .from('places_ai_calls')
-    .select('user_id, cost_usd')
-    .gte('created_at', since.toISOString())
-    .limit(20_000);
-  if (error) {
-    // Fail closed on cost protection: if we can't check spend, don't spend.
-    console.error('Spend check failed', error);
-    throw new HttpError(503, 'unavailable', 'The AI service is temporarily unavailable. Try again shortly.');
-  }
-  let total = 0;
-  let mine = 0;
-  for (const row of data ?? []) {
-    const cost = Number(row.cost_usd) || 0;
-    total += cost;
-    if (row.user_id === userId) mine += cost;
-  }
-  if (mine >= DAILY_USER_LIMIT_USD || total >= DAILY_TOTAL_LIMIT_USD) {
-    throw new HttpError(429, 'daily_limit', "Today's AI budget has been used up. It resets at midnight UTC.");
   }
 }
 
@@ -361,7 +332,82 @@ const PARSE_SCHEMA = {
   },
 };
 
-type CallContext = { admin: SupabaseClient; userId: string; requestBytes: number };
+type CallContext = { admin: SupabaseClient; userId: string; requestBytes: number; signal: AbortSignal };
+
+// ---------------------------------------------------------------------------
+// AI call ledger
+//
+// Every paid call is recorded BEFORE it is sent ("pending", with an estimated cost) by
+// places_begin_ai_call, which also checks the daily caps atomically. After the reply the row is
+// completed with the cost the provider reported. If the function dies mid-call, the pending row and
+// its estimate remain, so nothing sent goes unrecorded. If the pending row can't be written, the call
+// is not sent (fail closed).
+// ---------------------------------------------------------------------------
+
+const ESTIMATE_USD: Record<string, number> = {
+  parse_script_text: 0.05,
+  parse_script_images: 0.05,
+  parse_script_pdf: 0.1,
+  transcribe: 0.002,
+  guess_genders: 0.002,
+};
+
+async function beginCall(ctx: CallContext, purpose: string, model: string, estimateUsd: number): Promise<string> {
+  const { data, error } = await ctx.admin.rpc('places_begin_ai_call', {
+    p_user_id: ctx.userId,
+    p_purpose: purpose,
+    p_model: model,
+    p_estimate: estimateUsd,
+    p_request_bytes: ctx.requestBytes,
+    p_user_limit: DAILY_USER_LIMIT_USD,
+    p_total_limit: DAILY_TOTAL_LIMIT_USD,
+  });
+  if (error || typeof data !== 'string') {
+    if (error && /places_daily_limit/.test(error.message)) {
+      throw new HttpError(429, 'daily_limit', "Today's AI budget has been used up. It resets at midnight UTC.");
+    }
+    console.error('Could not record the AI call before sending it; not sending', error);
+    throw new HttpError(503, 'unavailable', 'The AI service is temporarily unavailable. Try again shortly.');
+  }
+  return data;
+}
+
+type CallOutcome = {
+  status: 'success' | 'error';
+  httpStatus: number | null;
+  latency: number;
+  modelUsed?: string | null;
+  generationId?: string | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  totalTokens?: number | null;
+  costUsd: number;
+  costIsEstimate: boolean;
+  error: string | null;
+};
+
+async function finishCall(ctx: CallContext, callId: string, outcome: CallOutcome) {
+  const update = {
+    status: outcome.status,
+    http_status: outcome.httpStatus,
+    latency_ms: outcome.latency,
+    model_used: outcome.modelUsed ?? null,
+    generation_id: outcome.generationId ?? null,
+    prompt_tokens: outcome.promptTokens ?? null,
+    completion_tokens: outcome.completionTokens ?? null,
+    total_tokens: outcome.totalTokens ?? null,
+    cost_usd: outcome.costUsd,
+    cost_is_estimate: outcome.costIsEstimate,
+    error: outcome.error,
+    completed_at: new Date().toISOString(),
+  };
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const { error } = await ctx.admin.from('places_ai_calls').update(update).eq('id', callId);
+    if (!error) return;
+    if (attempt < 3) await sleep(200 * attempt);
+    else console.error(`Could not complete AI call ${callId}; it stays pending with its estimated cost`, error);
+  }
+}
 
 async function handleParseScript(body: Record<string, unknown>, ctx: CallContext) {
   const input = body.input as
@@ -487,19 +533,39 @@ async function handleSpeak(body: Record<string, unknown>, ctx: CallContext) {
   const pct = Math.round((rate - 1) * 100);
   const prosodyRate = `${pct >= 0 ? '+' : ''}${pct}%`;
 
-  // 1) Free Edge voices, with one retry.
+  // 1) Free Edge voices, with one retry (recorded at zero cost).
   for (let attempt = 1; attempt <= 2; attempt++) {
+    const callId = await beginCall(ctx, 'tts', `edge:${voice}`, 0);
     const started = Date.now();
     try {
       const mp3 = await edgeSynthesize(text, voice, prosodyRate);
-      await logTts(ctx, `edge:${voice}`, text.length, Date.now() - started, 'success', 200, null, 0);
+      await finishCall(ctx, callId, {
+        status: 'success',
+        httpStatus: 200,
+        latency: Date.now() - started,
+        modelUsed: `edge:${voice}`,
+        promptTokens: text.length,
+        costUsd: 0,
+        costIsEstimate: false,
+        error: null,
+      });
       return { audio: bytesToBase64(mp3), format: 'mp3', engine: 'edge' };
     } catch (err) {
-      await logTts(ctx, `edge:${voice}`, text.length, Date.now() - started, 'error', null, String(err).slice(0, 300), 0);
+      await finishCall(ctx, callId, {
+        status: 'error',
+        httpStatus: null,
+        latency: Date.now() - started,
+        modelUsed: `edge:${voice}`,
+        promptTokens: text.length,
+        costUsd: 0,
+        costIsEstimate: false,
+        error: String(err).slice(0, 300),
+      });
     }
   }
 
-  // 2) Official Azure, if configured.
+  // 2) Official Azure, if configured. Azure doesn't report billed usage per request, so the cost is
+  //    the list price for the characters sent and is marked as an estimate.
   const key = Deno.env.get('AZURE_SPEECH_KEY');
   const region = Deno.env.get('AZURE_SPEECH_REGION');
   if (!key || !region) throw new HttpError(502, 'tts_failed', "Microsoft voices aren't available right now.");
@@ -507,10 +573,14 @@ async function handleSpeak(body: Record<string, unknown>, ctx: CallContext) {
   const ssml =
     `<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="${voice.slice(0, 5)}">` +
     `<voice name="${voice}"><prosody rate="${prosodyRate}">${escapeXml(text)}</prosody></voice></speak>`;
+  const listPrice = (text.length / 1_000_000) * AZURE_TTS_USD_PER_MILLION;
+  const callId = await beginCall(ctx, 'tts', `azure:${voice}`, listPrice);
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20_000);
+  const offAbort = onClientAbort(ctx, controller);
   let status: number | null = null;
+  const base = { modelUsed: `azure:${voice}`, promptTokens: text.length };
   try {
     const res = await fetch(`https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`, {
       method: 'POST',
@@ -526,46 +596,56 @@ async function handleSpeak(body: Record<string, unknown>, ctx: CallContext) {
     status = res.status;
     if (!res.ok) {
       const detail = (await res.text().catch(() => '')).slice(0, 300);
-      await logTts(ctx, `azure:${voice}`, text.length, Date.now() - started, 'error', status, detail || `HTTP ${status}`, 0);
+      await finishCall(ctx, callId, {
+        ...base,
+        status: 'error',
+        httpStatus: status,
+        latency: Date.now() - started,
+        costUsd: 0,
+        costIsEstimate: false,
+        error: detail || `HTTP ${status}`,
+      });
       throw new HttpError(502, 'tts_failed', "Microsoft voices aren't available right now.");
     }
     const bytes = new Uint8Array(await res.arrayBuffer());
-    const cost = (text.length / 1_000_000) * AZURE_TTS_USD_PER_MILLION;
-    await logTts(ctx, `azure:${voice}`, text.length, Date.now() - started, 'success', status, null, cost);
+    await finishCall(ctx, callId, {
+      ...base,
+      status: 'success',
+      httpStatus: status,
+      latency: Date.now() - started,
+      costUsd: listPrice,
+      costIsEstimate: true,
+      error: null,
+    });
     return { audio: bytesToBase64(bytes), format: 'mp3', engine: 'azure' };
   } catch (err) {
     if (err instanceof HttpError) throw err;
-    await logTts(ctx, `azure:${voice}`, text.length, Date.now() - started, 'error', status, String(err).slice(0, 300), 0);
+    // Unknown whether Azure billed it: keep the list-price estimate.
+    await finishCall(ctx, callId, {
+      ...base,
+      status: 'error',
+      httpStatus: status,
+      latency: Date.now() - started,
+      costUsd: listPrice,
+      costIsEstimate: true,
+      error: ctx.signal.aborted ? 'cancelled by app' : String(err).slice(0, 300),
+    });
     throw new HttpError(504, 'tts_failed', "Microsoft voices aren't available right now.");
   } finally {
     clearTimeout(timer);
+    offAbort();
   }
 }
 
-async function logTts(
-  ctx: CallContext,
-  model: string,
-  chars: number,
-  latency: number,
-  status: 'success' | 'error',
-  httpStatus: number | null,
-  error: string | null,
-  costUsd: number,
-) {
-  const { error: dbError } = await ctx.admin.from('places_ai_calls').insert({
-    user_id: ctx.userId,
-    purpose: 'tts',
-    model_requested: model,
-    model_used: model,
-    status,
-    http_status: httpStatus,
-    prompt_tokens: chars, // characters synthesized
-    cost_usd: costUsd,
-    latency_ms: latency,
-    request_bytes: ctx.requestBytes,
-    error,
-  });
-  if (dbError) console.error('Failed to log TTS call', dbError);
+/** Aborts an outgoing request when the app cancels (closes the connection). Returns an unsubscribe. */
+function onClientAbort(ctx: CallContext, controller: AbortController): () => void {
+  if (ctx.signal.aborted) {
+    controller.abort();
+    return () => {};
+  }
+  const handler = () => controller.abort();
+  ctx.signal.addEventListener('abort', handler, { once: true });
+  return () => ctx.signal.removeEventListener('abort', handler);
 }
 
 // --- Edge "Read Aloud" client --------------------------------------------------
@@ -994,12 +1074,18 @@ async function callOpenRouter(ctx: CallContext, req: OpenRouterRequest): Promise
   }
 
   const maxAttempts = 2;
+  const estimate = ESTIMATE_USD[req.purpose] ?? 0.05;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
   let lastError: HttpError | null = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (ctx.signal.aborted) throw new HttpError(499, 'cancelled', 'Cancelled.');
+    // Recorded before sending (and the daily caps checked atomically).
+    const callId = await beginCall(ctx, req.purpose, req.models[0] ?? 'unknown', estimate);
     const started = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), req.timeoutMs);
+    const offAbort = onClientAbort(ctx, controller);
     let httpStatus: number | null = null;
 
     try {
@@ -1016,18 +1102,27 @@ async function callOpenRouter(ctx: CallContext, req: OpenRouterRequest): Promise
       httpStatus = res.status;
       const payload = await res.json().catch(() => null);
       const latency = Date.now() - started;
-      const usage = payload?.usage ?? {};
+      const usage = (payload?.usage ?? {}) as Record<string, unknown>;
+      const reportedCost = num(usage.cost);
+      const tokens = {
+        modelUsed: payload?.model ?? null,
+        generationId: payload?.id ?? null,
+        promptTokens: num(usage.prompt_tokens),
+        completionTokens: num(usage.completion_tokens),
+        totalTokens: num(usage.total_tokens),
+      };
 
       const choiceError = payload?.choices?.[0]?.error;
       if (!res.ok || payload?.error || choiceError) {
         const message = String(payload?.error?.message ?? choiceError?.message ?? `HTTP ${res.status}`);
-        await logCall(ctx, req, {
+        // Failed requests report their cost when OpenRouter billed anything; otherwise nothing was charged.
+        await finishCall(ctx, callId, {
+          ...tokens,
           status: 'error',
           httpStatus,
           latency,
-          usage,
-          modelUsed: payload?.model ?? null,
-          generationId: payload?.id ?? null,
+          costUsd: reportedCost ?? 0,
+          costIsEstimate: false,
           error: message.slice(0, 500),
         });
         const retryable = res.status === 429 || res.status >= 500 || !!choiceError;
@@ -1038,7 +1133,7 @@ async function callOpenRouter(ctx: CallContext, req: OpenRouterRequest): Promise
             ? 'The AI account is out of credits.'
             : "The AI couldn't process that right now. Please try again.",
         );
-        if (retryable && attempt < maxAttempts) {
+        if (retryable && attempt < maxAttempts && !ctx.signal.aborted) {
           await sleep(800 * attempt);
           continue;
         }
@@ -1046,13 +1141,14 @@ async function callOpenRouter(ctx: CallContext, req: OpenRouterRequest): Promise
       }
 
       const content = payload?.choices?.[0]?.message?.content;
-      await logCall(ctx, req, {
+      await finishCall(ctx, callId, {
+        ...tokens,
         status: 'success',
         httpStatus,
         latency,
-        usage,
-        modelUsed: payload?.model ?? null,
-        generationId: payload?.id ?? null,
+        // OpenRouter's reported cost; the estimate only if it was missing.
+        costUsd: reportedCost ?? estimate,
+        costIsEstimate: reportedCost === null,
         error: null,
       });
       if (typeof content !== 'string' || !content.trim()) {
@@ -1062,15 +1158,17 @@ async function callOpenRouter(ctx: CallContext, req: OpenRouterRequest): Promise
     } catch (err) {
       if (err instanceof HttpError) throw err;
       const aborted = err instanceof DOMException && err.name === 'AbortError';
-      await logCall(ctx, req, {
+      const cancelled = ctx.signal.aborted;
+      // Timed out or cancelled mid-flight: the provider may still bill it, so keep the estimate.
+      await finishCall(ctx, callId, {
         status: 'error',
         httpStatus,
         latency: Date.now() - started,
-        usage: {},
-        modelUsed: null,
-        generationId: null,
-        error: aborted ? 'timeout' : String(err).slice(0, 500),
+        costUsd: estimate,
+        costIsEstimate: true,
+        error: cancelled ? 'cancelled by app' : aborted ? 'timeout' : String(err).slice(0, 500),
       });
+      if (cancelled) throw new HttpError(499, 'cancelled', 'Cancelled.');
       lastError = new HttpError(
         504,
         'ai_timeout',
@@ -1083,43 +1181,10 @@ async function callOpenRouter(ctx: CallContext, req: OpenRouterRequest): Promise
       throw lastError;
     } finally {
       clearTimeout(timer);
+      offAbort();
     }
   }
   throw lastError ?? new HttpError(502, 'ai_failed', 'The AI request failed.');
-}
-
-async function logCall(
-  ctx: CallContext,
-  req: OpenRouterRequest,
-  info: {
-    status: 'success' | 'error';
-    httpStatus: number | null;
-    latency: number;
-    usage: Record<string, unknown>;
-    modelUsed: string | null;
-    generationId: string | null;
-    error: string | null;
-  },
-) {
-  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-  const { error } = await ctx.admin.from('places_ai_calls').insert({
-    user_id: ctx.userId,
-    purpose: req.purpose,
-    model_requested: req.models[0] ?? null,
-    model_used: info.modelUsed,
-    generation_id: info.generationId,
-    status: info.status,
-    http_status: info.httpStatus,
-    prompt_tokens: num(info.usage.prompt_tokens),
-    completion_tokens: num(info.usage.completion_tokens),
-    total_tokens: num(info.usage.total_tokens),
-    cost_usd: num(info.usage.cost) ?? 0,
-    latency_ms: info.latency,
-    request_bytes: ctx.requestBytes,
-    error: info.error,
-  });
-  // Logging must never break the user's request, but it should be visible in function logs.
-  if (error) console.error('Failed to log AI call', error);
 }
 
 function parseJsonContent(content: string): unknown {

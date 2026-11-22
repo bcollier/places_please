@@ -1,7 +1,8 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { sanitizeGenders } from '@/lib/api';
-import { DEFAULT_SETTINGS, type Script, type Settings } from '@/lib/types';
+import type { GuestSnapshot, MergeProgress } from '@/lib/api';
+import { sanitizeGenders, sanitizeSettings } from '@/lib/sanitize';
+import type { Script, Settings } from '@/lib/types';
 
 /**
  * On-device copy of the user's scripts, settings and current script (AsyncStorage).
@@ -37,7 +38,8 @@ export async function loadLocalSnapshot(userId: string): Promise<LocalSnapshot |
           characters: Array.isArray(s.characters) ? s.characters : [],
           character_genders: sanitizeGenders(s.character_genders),
         })),
-      settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
+      // Same validation as settings loaded from Supabase.
+      settings: sanitizeSettings(parsed.settings),
       currentScriptId: typeof parsed.currentScriptId === 'string' ? parsed.currentScriptId : null,
       savedAt: typeof parsed.savedAt === 'string' ? parsed.savedAt : '',
     };
@@ -63,6 +65,40 @@ export async function saveLocalSnapshot(
 export async function clearLocalSnapshot(userId: string): Promise<void> {
   try {
     await AsyncStorage.removeItem(keyFor(userId));
+  } catch {
+    // ignore
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pending guest-data copy (see src/lib/guest-merge.ts)
+// ---------------------------------------------------------------------------
+
+export type PendingMerge = { snapshot: GuestSnapshot; progress: MergeProgress; createdAt: string };
+
+const mergeKey = (userId: string) => `places-please:pending-merge:${userId}`;
+
+export async function savePendingMerge(userId: string, pending: PendingMerge): Promise<void> {
+  // Must succeed before copying starts, so errors are thrown, not swallowed.
+  await AsyncStorage.setItem(mergeKey(userId), JSON.stringify(pending));
+}
+
+export async function loadPendingMerge(userId: string): Promise<PendingMerge | null> {
+  try {
+    const raw = await AsyncStorage.getItem(mergeKey(userId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PendingMerge;
+    if (!parsed?.snapshot || !Array.isArray(parsed.snapshot.scripts) || !parsed.progress) return null;
+    return parsed;
+  } catch (err) {
+    console.warn('[local-store] pending merge read failed', err);
+    return null;
+  }
+}
+
+export async function clearPendingMerge(userId: string): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(mergeKey(userId));
   } catch {
     // ignore
   }

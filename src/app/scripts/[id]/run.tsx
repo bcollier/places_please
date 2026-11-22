@@ -43,7 +43,7 @@ function RunLines({ scriptId, scene }: { scriptId: string; scene: string | null 
   const lines = useMemo(() => linesInScene(script.lines, scene), [script.lines, scene]);
 
   const recorder = useAudioRecorder(SPEECH_RECORDING_OPTIONS);
-  const { save, reset, saveError, isSaved } = useSessionSaver();
+  const { save, retry, reset, saveError, isSaved } = useSessionSaver();
   const startedAt = useRef(new Date());
   const [peek, setPeek] = useState(false);
 
@@ -122,6 +122,7 @@ function RunLines({ scriptId, scene }: { scriptId: string; scene: string | null 
                 attempts={state.attempts}
                 lines={lines}
                 saveError={saveError}
+                onRetrySave={retry}
                 onAgain={restart}
                 onDone={goBack}
               />

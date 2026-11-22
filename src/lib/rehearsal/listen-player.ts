@@ -18,6 +18,8 @@ export class ListenPlayer {
   private listeners = new Set<(s: ListenState) => void>();
   private token: Cancellation | null = null;
   private voices: VoiceCast | null = null;
+  /** Lines played (or left as a gap for you) to the end, for practice history. */
+  private heard = new Set<number>();
   private recast = false;
 
   constructor(
@@ -55,6 +57,11 @@ export class ListenPlayer {
     return this.state;
   }
 
+  /** Number of different lines heard all the way through in this session. */
+  heardCount() {
+    return this.heard.size;
+  }
+
   async play(fromIndex = this.state.phase === 'finished' ? 0 : this.state.index) {
     this.cancel();
     const token = new Cancellation();
@@ -87,6 +94,7 @@ export class ListenPlayer {
         } else {
           await speak(line.text, this.voices.forCharacter(line.character), this.settings.speechRate, token);
         }
+        this.heard.add(i);
         await cancellableDelay(250, token);
       }
       this.set({ phase: 'finished', gap: false });
@@ -94,6 +102,8 @@ export class ListenPlayer {
     } catch (err) {
       if (isCancelled(err)) return;
       console.warn('[listen] error', err);
+      this.cancel();
+      await releaseAudioSession();
       this.set({ phase: 'error', error: toUserMessage(err) });
     }
   }

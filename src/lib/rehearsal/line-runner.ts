@@ -133,6 +133,9 @@ export class LineRunner {
     } catch (err) {
       if (isCancelled(err)) return;
       console.warn('[runner] stopped with error', err);
+      this.cancelCurrent();
+      // Don't leave the background (recording-capable) session and silent keep-alive running.
+      await releaseAudioSession();
       this.set({ phase: 'error', error: toUserMessage(err), errorCode: err instanceof AppError ? err.code : null });
     }
   }

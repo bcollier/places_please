@@ -169,6 +169,22 @@ export async function castVoices(options: {
 let cloudDisabled = false;
 let consecutiveFailures = 0;
 
+/**
+ * Microsoft's service sometimes stalls on one particular voice. Before giving up on a line, try the
+ * next voice of the same gender, so the scene keeps its natural voices instead of going silent.
+ */
+async function fetchWithAlternate(text: string, voice: string, rate: number): Promise<string> {
+  try {
+    return await fetchAudioBase64(text, voice, rate);
+  } catch (err) {
+    const pool = FEMALE_VOICES.includes(voice) ? FEMALE_VOICES : MALE_VOICES.includes(voice) ? MALE_VOICES : null;
+    if (!pool) throw err;
+    const alternate = pool[(pool.indexOf(voice) + 1) % pool.length];
+    console.warn(`[tts] ${voice} failed; trying ${alternate}`);
+    return fetchAudioBase64(text, alternate, rate);
+  }
+}
+
 // Web only: the local voice helper (`npm run voices`) fetches Microsoft voices for the browser.
 const VOICE_HELPER_URL = 'http://localhost:8790';
 let helperCheck: Promise<boolean> | null = null;
@@ -190,7 +206,7 @@ function voiceHelperAvailable(): Promise<boolean> {
 
 async function fetchFromVoiceHelper(text: string, voice: string, rate: number): Promise<string> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 15_000);
+  const timer = setTimeout(() => controller.abort(), 14_000); // helper: 2 tries x 6 s
   try {
     const res = await fetch(`${VOICE_HELPER_URL}/tts`, {
       method: 'POST',
@@ -242,12 +258,12 @@ function cloudAudioUri(text: string, voice: string, rate: number): Promise<strin
     if (Platform.OS !== 'web') {
       const file = new File(Paths.cache, name);
       if (file.exists) return file.uri;
-      const audio = await fetchAudioBase64(text, voice, rate);
+      const audio = await fetchWithAlternate(text, voice, rate);
       file.create({ overwrite: true });
       await file.write(audio, { encoding: 'base64' });
       return file.uri;
     }
-    const audio = await fetchAudioBase64(text, voice, rate);
+    const audio = await fetchWithAlternate(text, voice, rate);
     return `data:audio/mpeg;base64,${audio}`;
   })();
   audioCache.set(key, promise);

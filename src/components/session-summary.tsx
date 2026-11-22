@@ -13,6 +13,7 @@ export function SessionSummary({
   attempts,
   lines,
   saveError,
+  onRetrySave,
   onAgain,
   onDone,
   headline,
@@ -20,6 +21,7 @@ export function SessionSummary({
   attempts: LineAttempt[];
   lines: ScriptLine[];
   saveError: string | null;
+  onRetrySave?: () => void;
   onAgain: () => void;
   onDone: () => void;
   headline?: string;
@@ -70,9 +72,12 @@ export function SessionSummary({
       ) : null}
 
       {saveError ? (
-        <Text variant="caption" color="miss">
-          {saveError}
-        </Text>
+        <View style={styles.saveError}>
+          <Text variant="caption" color="miss">
+            {saveError}
+          </Text>
+          {onRetrySave ? <Button title="Try saving again" size="small" variant="secondary" onPress={onRetrySave} /> : null}
+        </View>
       ) : null}
 
       <SaveAccountPrompt />
@@ -106,4 +111,5 @@ const styles = StyleSheet.create({
   reviewCard: { gap: Spacing.one },
   reviewText: { fontSize: 18, lineHeight: 26 },
   actions: { gap: Spacing.three, marginTop: Spacing.five },
+  saveError: { gap: Spacing.two, alignItems: 'flex-start' },
 });

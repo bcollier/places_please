@@ -3,7 +3,12 @@ import type { ScriptLine } from '@/lib/types';
 
 /**
  * Warm Up flash cards: show a partner's cue line, pick the line you say next.
- * Distractors come from your other lines (ideally similar length) so you have to really know it.
+ *
+ * Every card is genuinely multiple choice: the right answer plus at least one (up to three) wrong
+ * answers whose wording is different from it and from each other (compared ignoring case and
+ * punctuation). Distractors come from your other lines first (similar length preferred), then from
+ * other characters' lines. Cues that can't get a wrong answer are left out, and Warm Up is only
+ * offered when at least one card can be made.
  */
 
 export type WarmupQuestion = {
@@ -12,42 +17,76 @@ export type WarmupQuestion = {
   choices: ScriptLine[];
 };
 
-function shuffle<T>(items: T[]): T[] {
+export const MIN_CHOICES = 2;
+export const MAX_CHOICES = 4;
+
+/** Wording used to decide whether two lines are "the same answer". */
+export function normalizeForChoice(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[‘’]/g, "'")
+    .replace(/[^a-z0-9' ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function shuffle<T>(items: T[], random: () => number): T[] {
   const a = [...items];
   for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(random() * (i + 1));
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
 }
 
-export function buildWarmupRound(lines: ScriptLine[], me: string, count = 10, choicesPerQuestion = 4): WarmupQuestion[] {
-  const pairs = cuePairs(lines, me);
-  const myLines = lines.filter((l) => l.character === me);
-  const otherLines = lines.filter((l) => l.character !== me);
+function buildQuestion(
+  cue: ScriptLine,
+  answer: ScriptLine,
+  lines: ScriptLine[],
+  me: string,
+  maxChoices: number,
+  random: () => number,
+): WarmupQuestion | null {
+  const answerKey = normalizeForChoice(answer.text);
+  const seen = new Set<string>([answerKey]);
+  const distinct = (pool: ScriptLine[]) =>
+    pool.filter((l) => {
+      const key = normalizeForChoice(l.text);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 
-  const picked = shuffle(pairs).slice(0, count);
-  return picked.map(({ cue, mine }) => {
-    const sameText = (l: ScriptLine) => l.text.trim().toLowerCase() === mine.text.trim().toLowerCase();
-    let pool = myLines.filter((l) => l.id !== mine.id && !sameText(l));
-    if (pool.length < choicesPerQuestion - 1) {
-      pool = [...pool, ...otherLines.filter((l) => l.id !== cue.id && !sameText(l))];
-    }
-    // Prefer distractors of similar length, with some randomness.
-    const len = mine.text.length;
-    const distractors = shuffle(pool)
-      .sort((a, b) => Math.abs(a.text.length - len) - Math.abs(b.text.length - len))
-      .slice(0, Math.min(pool.length, (choicesPerQuestion - 1) * 3));
-    const chosen: ScriptLine[] = [];
-    for (const d of shuffle(distractors)) {
-      if (chosen.length >= choicesPerQuestion - 1) break;
-      if (!chosen.some((c) => c.text === d.text)) chosen.push(d);
-    }
-    return { cue, answer: mine, choices: shuffle([mine, ...chosen]) };
-  });
+  const len = answer.text.length;
+  const bySimilarLength = (pool: ScriptLine[]) =>
+    shuffle(pool, random).sort((a, b) => Math.abs(a.text.length - len) - Math.abs(b.text.length - len));
+
+  // Mine first (the hard case: which of MY lines comes next?), then others' lines, never the cue.
+  const mine = distinct(bySimilarLength(lines.filter((l) => l.character === me && l.id !== answer.id)));
+  const others = distinct(bySimilarLength(lines.filter((l) => l.character !== me && l.id !== cue.id)));
+  const wrong = [...mine, ...others].slice(0, maxChoices - 1);
+  if (wrong.length < MIN_CHOICES - 1) return null;
+  return { cue, answer, choices: shuffle([answer, ...wrong], random) };
 }
 
+export function buildWarmupRound(
+  lines: ScriptLine[],
+  me: string,
+  count = 10,
+  maxChoices = MAX_CHOICES,
+  random: () => number = Math.random,
+): WarmupQuestion[] {
+  const questions: WarmupQuestion[] = [];
+  for (const { cue, mine } of shuffle(cuePairs(lines, me), random)) {
+    if (questions.length >= count) break;
+    const q = buildQuestion(cue, mine, lines, me, maxChoices, random);
+    if (q) questions.push(q);
+  }
+  return questions;
+}
+
+/** True when at least one genuinely multiple-choice card can be made. */
 export function warmupAvailable(lines: ScriptLine[], me: string | null): boolean {
   if (!me) return false;
-  return cuePairs(lines, me).length > 0 && lines.length >= 3;
+  return cuePairs(lines, me).some(({ cue, mine }) => buildQuestion(cue, mine, lines, me, MAX_CHOICES, Math.random) !== null);
 }

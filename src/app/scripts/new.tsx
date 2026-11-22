@@ -54,7 +54,13 @@ export default function NewScriptScreen() {
   const [saving, setSaving] = useState(false);
   const cancelRef = useRef<CancelToken>({ cancelled: false });
 
-  useEffect(() => () => void (cancelRef.current.cancelled = true), []);
+  useEffect(
+    () => () => {
+      cancelRef.current.cancelled = true;
+      cancelRef.current.controller?.abort();
+    },
+    [],
+  );
 
   // Coming back from signing in: the "please sign in" message no longer applies.
   const { account } = useAuth();
@@ -67,7 +73,7 @@ export default function NewScriptScreen() {
 
   const run = async (source: { kind: 'photos'; pages: PageImage[] } | { kind: 'doc'; doc: PickedDocument }) => {
     setError(null);
-    const token: CancelToken = { cancelled: false };
+    const token: CancelToken = { cancelled: false, controller: new AbortController() };
     cancelRef.current = token;
     setStage({ kind: 'processing', progress: { step: 'Getting started', done: 0, total: 1 } });
     try {
@@ -92,6 +98,7 @@ export default function NewScriptScreen() {
 
   const cancelProcessing = () => {
     cancelRef.current.cancelled = true;
+    cancelRef.current.controller?.abort();
     setStage(pages.length ? { kind: 'pages' } : { kind: 'choose' });
   };
 

@@ -60,7 +60,7 @@ const server = http.createServer(async (req, res) => {
   const started = Date.now();
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const mp3 = await edgeSynthesize(text, voice, rate);
+      const mp3 = await edgeSynthesize(text, voice, rate, 6_000);
       console.log(`voice ${voice} ${text.length} chars ${Date.now() - started} ms`);
       return send(res, 200, { audio: bytesToBase64(mp3) });
     } catch (err) {

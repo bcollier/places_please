@@ -56,7 +56,7 @@ function Warmup({ scriptId, scene }: { scriptId: string; scene: string | null })
   const [attempts, setAttempts] = useState<LineAttempt[]>([]);
   const startedAt = useRef(new Date());
   const speechToken = useRef<Cancellation | null>(null);
-  const { save, reset, saveError } = useSessionSaver();
+  const { save, retry, reset, saveError } = useSessionSaver();
 
   useEffect(() => {
     preloadSounds();
@@ -143,6 +143,7 @@ function Warmup({ scriptId, scene }: { scriptId: string; scene: string | null })
               attempts={attempts}
               lines={lines}
               saveError={saveError}
+              onRetrySave={retry}
               onAgain={again}
               onDone={goBack}
               headline={`${attempts.filter((a) => a.verdict === 'perfect').length} of ${questions.length} right`}

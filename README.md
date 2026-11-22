@@ -111,7 +111,13 @@ Without it the browser uses its own voices. The iPhone app doesn't need it.
 
 ## AI cost logging
 
-Every OpenRouter request is written to `public.places_ai_calls`: purpose, model requested, model used, tokens, `cost_usd`, latency, status and error. Failed requests and retries are logged too. Only the edge function can write to this table; users can read their own rows, and **Settings › AI usage** shows the 30-day total.
+Every paid AI call goes through a ledger in `public.places_ai_calls`:
+
+1. **Before sending**, `places_begin_ai_call` (a Postgres function) checks the daily spend caps and inserts a row with `status = 'pending'` and an estimated cost, in one transaction under an advisory lock, so simultaneous requests can't race past the caps. If that row can't be written, the call is not sent.
+2. **After the reply**, the row is completed: status, model used, tokens, latency, and OpenRouter's reported `usage.cost` (`cost_is_estimate = false`).
+3. If the function stops mid-call, the row stays `pending` with its estimate, so nothing that was sent goes unrecorded. Timeouts keep the estimate too, because the provider may still bill them. Azure TTS (optional backup) is always a list-price estimate, flagged with `cost_is_estimate = true`.
+
+Only the edge function can write this table; users can read their own rows, and **Settings › AI usage** shows the 30-day total.
 
 ```sql
 -- spend by day and purpose
@@ -122,7 +128,8 @@ from places_ai_calls group by 1, 2 order by 1 desc;
 ## Development
 
 ```bash
-npx tsc --noEmit      # typecheck
+npm test              # unit tests (Node's test runner): scoring, script model, Warm Up, validation, voice token
+npm run typecheck     # app + tests
 npx expo lint         # lint
 npx expo-doctor       # dependency check
 node scripts/generate-sounds.mjs   # regenerate the sound effects in assets/sounds

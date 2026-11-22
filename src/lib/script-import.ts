@@ -14,7 +14,8 @@ export type PickedDocument = { uri: string; name: string; kind: 'pdf' | 'docx'; 
 
 export type ImportProgress = { step: string; done: number; total: number };
 
-export type CancelToken = { cancelled: boolean };
+/** `controller` aborts the in-flight network request when the user cancels. */
+export type CancelToken = { cancelled: boolean; controller?: AbortController };
 
 const MAX_PAGES = 40;
 const IMAGES_PER_CHUNK = 3;
@@ -129,14 +130,23 @@ async function parseChunk(
   checkCancelled(token);
   const last = acc.lines[acc.lines.length - 1];
   const result = await withRetry(
-    () =>
-      parseScriptChunk(input, {
-        knownCharacters: uniqueCharacters(acc.lines),
-        lastSpeaker: last?.character ?? null,
-        lastScene: last?.scene ?? null,
-        chunkIndex,
-        chunkCount,
-      }),
+    () => {
+      checkCancelled(token); // a retry after Cancel stops here
+      return parseScriptChunk(
+        input,
+        {
+          knownCharacters: uniqueCharacters(acc.lines),
+          lastSpeaker: last?.character ?? null,
+          lastScene: last?.scene ?? null,
+          chunkIndex,
+          chunkCount,
+        },
+        token.controller?.signal,
+      ).catch((err) => {
+        if (token.cancelled) throw new CancelledError();
+        throw err;
+      });
+    },
     2,
     1500,
   );
@@ -195,7 +205,17 @@ export async function importFromDocument(
   }
   checkCancelled(token);
 
-  const extracted = await withRetry(() => extractDocumentText(doc.kind, base64), 2, 1500);
+  const extracted = await withRetry(
+    () => {
+      checkCancelled(token);
+      return extractDocumentText(doc.kind, base64, token.controller?.signal).catch((err) => {
+        if (token.cancelled) throw new CancelledError();
+        throw err;
+      });
+    },
+    2,
+    1500,
+  );
   checkCancelled(token);
 
   const pages = extracted.pages.map((p) => p.trim());

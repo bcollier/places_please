@@ -1,6 +1,7 @@
 import type { PostgrestError } from '@supabase/supabase-js';
 
 import { AppError, withRetry } from '@/lib/errors';
+import { sanitizeGenders, sanitizeSettings } from '@/lib/sanitize';
 import { getSupabase } from '@/lib/supabase';
 import {
   DEFAULT_SETTINGS,
@@ -38,14 +39,6 @@ function sanitizeLines(value: unknown): ScriptLine[] {
     .filter((l) => l.character && l.text);
 }
 
-export function sanitizeGenders(value: unknown): Record<string, Gender> {
-  const out: Record<string, Gender> = {};
-  if (!value || typeof value !== 'object') return out;
-  for (const [name, g] of Object.entries(value as Record<string, unknown>)) {
-    if (g === 'female' || g === 'male') out[name] = g;
-  }
-  return out;
-}
 
 function toScript(row: Record<string, unknown>): Script {
   const lines = sanitizeLines(row.lines);
@@ -130,21 +123,6 @@ export async function deleteScript(id: string): Promise<void> {
 
 export type Profile = { settings: Settings; current_script_id: string | null };
 
-function toSettings(value: unknown): Settings {
-  const v = (value && typeof value === 'object' ? value : {}) as Partial<Settings>;
-  const rate = Number(v.speechRate);
-  return {
-    voiceEngine: v.voiceEngine === 'device' ? 'device' : 'microsoft',
-    speechRate: Number.isFinite(rate) && rate >= 0.5 && rate <= 1.5 ? rate : DEFAULT_SETTINGS.speechRate,
-    pauseLength: v.pauseLength === 'short' || v.pauseLength === 'long' ? v.pauseLength : 'medium',
-    pauseOnMistake: v.pauseOnMistake === 'missed' || v.pauseOnMistake === 'never' ? v.pauseOnMistake : 'all',
-    promptOnMiss: typeof v.promptOnMiss === 'boolean' ? v.promptOnMiss : DEFAULT_SETTINGS.promptOnMiss,
-    cueSound: typeof v.cueSound === 'boolean' ? v.cueSound : DEFAULT_SETTINGS.cueSound,
-    listenReadsMyLines:
-      typeof v.listenReadsMyLines === 'boolean' ? v.listenReadsMyLines : DEFAULT_SETTINGS.listenReadsMyLines,
-    accountPromptDismissed: v.accountPromptDismissed === true,
-  };
-}
 
 export async function getProfile(userId: string): Promise<Profile> {
   return withRetry(async () => {
@@ -161,7 +139,7 @@ export async function getProfile(userId: string): Promise<Profile> {
       if (insertError) dbError(insertError, 'set up your profile');
       return { settings: DEFAULT_SETTINGS, current_script_id: null };
     }
-    return { settings: toSettings(data.settings), current_script_id: data.current_script_id ?? null };
+    return { settings: sanitizeSettings(data.settings), current_script_id: data.current_script_id ?? null };
   });
 }
 
@@ -290,11 +268,21 @@ export async function exportGuestData(): Promise<GuestSnapshot> {
   return { scripts, history };
 }
 
-/** Copies a guest's scripts and history into the signed-in account. Returns scripts copied. */
-export async function importGuestData(snapshot: GuestSnapshot): Promise<number> {
+/** How far a guest-data copy got; saved after every step so a failed copy can resume without duplicates. */
+export type MergeProgress = { scriptIds: Record<string, string>; historyChunksDone: number };
+
+/**
+ * Copies a guest's scripts and history into the signed-in account, resuming from `progress`.
+ * `onProgress` is awaited after every script and history chunk. Returns the number of scripts.
+ */
+export async function importGuestData(
+  snapshot: GuestSnapshot,
+  progress: MergeProgress,
+  onProgress: (progress: MergeProgress) => Promise<void>,
+): Promise<number> {
   const supabase = getSupabase();
-  const idMap = new Map<string, string>();
   for (const s of snapshot.scripts) {
+    if (progress.scriptIds[s.id]) continue; // already copied on an earlier try
     const { data, error } = await supabase
       .from('places_scripts')
       .insert({
@@ -309,12 +297,13 @@ export async function importGuestData(snapshot: GuestSnapshot): Promise<number> 
       .select('id')
       .single();
     if (error || !data) dbError(error, 'copy your scripts');
-    idMap.set(s.id, data.id as string);
+    progress = { ...progress, scriptIds: { ...progress.scriptIds, [s.id]: data.id as string } };
+    await onProgress(progress);
   }
   const rows = snapshot.history
-    .filter((h) => !h.script_id || idMap.has(h.script_id))
+    .filter((h) => !h.script_id || progress.scriptIds[h.script_id])
     .map((h) => ({
-      script_id: h.script_id ? idMap.get(h.script_id) : null,
+      script_id: h.script_id ? progress.scriptIds[h.script_id] : null,
       mode: h.mode,
       character: h.character,
       scene: h.scene,
@@ -328,9 +317,12 @@ export async function importGuestData(snapshot: GuestSnapshot): Promise<number> 
       score: h.score,
       details: h.details,
     }));
-  for (let i = 0; i < rows.length; i += 200) {
-    const { error } = await supabase.from('places_practice_history').insert(rows.slice(i, i + 200));
+  const CHUNK = 200;
+  for (let chunk = progress.historyChunksDone; chunk * CHUNK < rows.length; chunk++) {
+    const { error } = await supabase.from('places_practice_history').insert(rows.slice(chunk * CHUNK, (chunk + 1) * CHUNK));
     if (error) dbError(error, 'copy your practice history');
+    progress = { ...progress, historyChunksDone: chunk + 1 };
+    await onProgress(progress);
   }
   return snapshot.scripts.length;
 }

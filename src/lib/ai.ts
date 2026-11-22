@@ -18,8 +18,9 @@ type ParseResult = {
 type SpeakResult = { audio: string; format: 'mp3' };
 type TranscribeResult = { transcript: string };
 
-async function invoke<T>(body: Record<string, unknown>, timeoutMs: number): Promise<T> {
-  const call = getSupabase().functions.invoke('places-ai', { body });
+async function invoke<T>(body: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal): Promise<T> {
+  // `signal` really cancels the request; the edge function then aborts its OpenRouter call too.
+  const call = getSupabase().functions.invoke('places-ai', { body, signal });
   const { data, error } = await withTimeout(call, timeoutMs);
 
   if (error) {
@@ -52,8 +53,8 @@ async function invoke<T>(body: Record<string, unknown>, timeoutMs: number): Prom
   return result;
 }
 
-export function extractDocumentText(kind: 'pdf' | 'docx', base64: string) {
-  return invoke<ExtractTextResult>({ action: 'extract_text', file: { kind, base64 } }, 90_000);
+export function extractDocumentText(kind: 'pdf' | 'docx', base64: string, signal?: AbortSignal) {
+  return invoke<ExtractTextResult>({ action: 'extract_text', file: { kind, base64 } }, 90_000, signal);
 }
 
 export type ParseContext = {
@@ -67,8 +68,9 @@ export type ParseContext = {
 export function parseScriptChunk(
   input: { kind: 'images'; images: string[] } | { kind: 'text'; text: string } | { kind: 'pdf'; base64: string },
   context: ParseContext,
+  signal?: AbortSignal,
 ) {
-  return invoke<ParseResult>({ action: 'parse_script', input, context }, 280_000);
+  return invoke<ParseResult>({ action: 'parse_script', input, context }, 280_000, signal);
 }
 
 /** Woman's or man's voice for each character of a script (for scripts imported without guesses). */

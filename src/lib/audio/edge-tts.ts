@@ -214,7 +214,7 @@ const escapeXml = (s: string) =>
 type HeaderWebSocket = new (url: string, protocols: string[], options: { headers: Record<string, string> }) => WebSocket;
 
 /** Returns MP3 bytes for the text, or throws. */
-export function edgeSynthesize(text: string, voice: string, rate: number, timeoutMs = 10_000): Promise<Uint8Array> {
+export function edgeSynthesize(text: string, voice: string, rate: number, timeoutMs = 6_000): Promise<Uint8Array> {
   const pct = Math.round((rate - 1) * 100);
   const prosodyRate = `${pct >= 0 ? '+' : ''}${pct}%`;
   const url =

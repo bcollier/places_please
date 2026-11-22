@@ -168,3 +168,21 @@ _(Sent mid-turn.)_
 ## 34. 2026-11-22
 
 > push to github
+
+## 35. 2026-11-22
+
+> for this one, this was just saying you do not have to build offline capabilities, but they were added on. this is not a fail The literal offline-behavior criterion is not enforced.**
+>
+> fix every other FAIL or Warning where possible, report all fixes in REVIEW_FIXES.md
+
+## 36. 2026-11-22
+
+> [pasted web log: "[tts] Microsoft voice failed; using device voice [AbortError: signal is aborted without reason]" ×3]
+>
+> the "Listen" function doesn't play sound
+
+_(Sent mid-turn.)_
+
+## 37. 2026-11-22
+
+> yes call this commit something like Fixes after AI review and push to github
