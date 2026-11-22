@@ -1,47 +1,78 @@
 /**
- * Below are the colors that are used in the app. The colors are defined in the light and dark mode.
- * There are many other ways to style your app. For example, [Nativewind](https://www.nativewind.dev/), [Tamagui](https://tamagui.dev/), [unistyles](https://unistyl.es/), etc.
+ * Design tokens for Places, Please.
+ * Palette is Carnegie Mellon's brand colors: Carnegie Red, Iron Gray, Steel Gray,
+ * plus the secondary "thread" colors for result states.
  */
 
 import '@/global.css';
 
 import { Platform } from 'react-native';
 
+export const Brand = {
+  carnegieRed: '#C41230',
+  scotsRose: '#EF3A47',
+  ironGray: '#6D6E71',
+  steelGray: '#E0E0E0',
+  goldThread: '#FDB515',
+  greenThread: '#009647',
+  tealThread: '#008F91',
+  blueThread: '#043673',
+  black: '#000000',
+  white: '#FFFFFF',
+} as const;
+
 export const Colors = {
   light: {
-    text: '#000000',
-    background: '#ffffff',
-    backgroundElement: '#F0F0F3',
-    backgroundSelected: '#E0E1E6',
-    textSecondary: '#60646C',
+    text: '#111111',
+    textSecondary: Brand.ironGray,
+    textTertiary: '#9A9B9E',
+    background: '#FFFFFF',
+    surface: '#F7F6F4',
+    surfaceRaised: '#FFFFFF',
+    border: Brand.steelGray,
+    primary: Brand.carnegieRed,
+    primaryPressed: '#A10E27',
+    onPrimary: Brand.white,
+    primarySoft: '#FBE7EA',
+    perfect: Brand.greenThread,
+    perfectSoft: '#E3F4EA',
+    close: '#B37F00',
+    closeSoft: '#FFF4D6',
+    miss: Brand.carnegieRed,
+    missSoft: '#FBE7EA',
+    accent: Brand.tealThread,
   },
   dark: {
-    text: '#ffffff',
-    background: '#000000',
-    backgroundElement: '#212225',
-    backgroundSelected: '#2E3135',
-    textSecondary: '#B0B4BA',
+    text: '#F4F4F5',
+    textSecondary: '#A7A8AA',
+    textTertiary: '#737477',
+    background: '#0D0D0E',
+    surface: '#18181A',
+    surfaceRaised: '#202023',
+    border: '#2E2E32',
+    primary: Brand.scotsRose,
+    primaryPressed: '#D52F3C',
+    onPrimary: Brand.white,
+    primarySoft: '#3A1419',
+    perfect: '#2DBE6C',
+    perfectSoft: '#123222',
+    close: Brand.goldThread,
+    closeSoft: '#3A2E0C',
+    miss: Brand.scotsRose,
+    missSoft: '#3A1419',
+    accent: '#22B5B7',
   },
 } as const;
 
-export type ThemeColor = keyof typeof Colors.light & keyof typeof Colors.dark;
+export type ThemeColors = { [K in keyof typeof Colors.light]: string };
+export type ThemeColor = keyof ThemeColors;
 
 export const Fonts = Platform.select({
   ios: {
-    /** iOS `UIFontDescriptorSystemDesignDefault` */
     sans: 'system-ui',
-    /** iOS `UIFontDescriptorSystemDesignSerif` */
     serif: 'ui-serif',
-    /** iOS `UIFontDescriptorSystemDesignRounded` */
     rounded: 'ui-rounded',
-    /** iOS `UIFontDescriptorSystemDesignMonospaced` */
     mono: 'ui-monospace',
-  },
-  default: {
-    sans: 'normal',
-    serif: 'serif',
-    rounded: 'normal',
-    mono: 'monospace',
   },
   web: {
     sans: 'var(--font-display)',
@@ -49,17 +80,30 @@ export const Fonts = Platform.select({
     rounded: 'var(--font-rounded)',
     mono: 'var(--font-mono)',
   },
+  default: {
+    sans: 'normal',
+    serif: 'serif',
+    rounded: 'normal',
+    mono: 'monospace',
+  },
 });
 
 export const Spacing = {
   half: 2,
   one: 4,
   two: 8,
-  three: 16,
-  four: 24,
-  five: 32,
-  six: 64,
+  three: 12,
+  four: 16,
+  five: 24,
+  six: 32,
+  seven: 48,
 } as const;
 
-export const BottomTabInset = Platform.select({ ios: 50, android: 80 }) ?? 0;
-export const MaxContentWidth = 800;
+export const Radius = {
+  small: 8,
+  medium: 12,
+  large: 18,
+  pill: 999,
+} as const;
+
+export const MaxContentWidth = 720;

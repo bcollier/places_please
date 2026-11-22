@@ -1,0 +1,122 @@
+import { Cancellation, cancellableDelay } from '@/lib/audio/cancel';
+import { configureAudioSession, releaseAudioSession, startKeepAlive } from '@/lib/audio/session';
+import { castVoices, prefetchSpeech, speak, stopSpeaking, type VoiceCast } from '@/lib/audio/tts';
+import { isCancelled, toUserMessage } from '@/lib/errors';
+import { countWords, uniqueCharacters } from '@/lib/script-model';
+import type { Gender, ScriptLine, Settings } from '@/lib/types';
+
+/**
+ * Listen mode: reads the scene aloud with a different voice for each character.
+ * Optionally leaves a silent gap for the actor's own lines so they can say them along.
+ */
+
+export type ListenPhase = 'idle' | 'playing' | 'paused' | 'finished' | 'error';
+export type ListenState = { phase: ListenPhase; index: number; error: string | null; gap: boolean };
+
+export class ListenPlayer {
+  private state: ListenState = { phase: 'idle', index: 0, error: null, gap: false };
+  private listeners = new Set<(s: ListenState) => void>();
+  private token: Cancellation | null = null;
+  private voices: VoiceCast | null = null;
+  private recast = false;
+
+  constructor(
+    private lines: ScriptLine[],
+    private me: string | null,
+    private settings: Settings,
+    private genders: Record<string, Gender> = {},
+  ) {}
+
+  /** New voice casting (e.g. genders just guessed); takes effect at the next start. */
+  updateGenders(genders: Record<string, Gender>) {
+    this.genders = genders;
+    this.recast = true; // keep the current voices until the next start, never mid-line
+  }
+
+  subscribe(fn: (s: ListenState) => void) {
+    this.listeners.add(fn);
+    fn(this.state);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  }
+
+  private set(patch: Partial<ListenState>) {
+    this.state = { ...this.state, ...patch };
+    for (const l of this.listeners) l(this.state);
+  }
+
+  /** Takes effect from the next line. */
+  updateSettings(patch: Partial<Settings>) {
+    this.settings = { ...this.settings, ...patch };
+  }
+
+  getState() {
+    return this.state;
+  }
+
+  async play(fromIndex = this.state.phase === 'finished' ? 0 : this.state.index) {
+    this.cancel();
+    const token = new Cancellation();
+    this.token = token;
+    this.set({ phase: 'playing', index: fromIndex, error: null });
+    try {
+      await configureAudioSession('listen');
+      startKeepAlive();
+      if (!this.voices || this.recast) {
+        this.recast = false;
+        this.voices = await castVoices({
+          characters: uniqueCharacters(this.lines),
+          me: this.me,
+          genders: this.genders,
+          engine: this.settings.voiceEngine,
+        });
+      }
+      for (let i = fromIndex; i < this.lines.length; i++) {
+        token.throwIfCancelled();
+        const line = this.lines[i];
+        this.set({ index: i, gap: false });
+        for (const next of this.lines.slice(i + 1, i + 3)) {
+          if (next.character !== this.me || this.settings.listenReadsMyLines) {
+            prefetchSpeech(next.text, this.voices.forCharacter(next.character), this.settings.speechRate);
+          }
+        }
+        if (line.character === this.me && !this.settings.listenReadsMyLines) {
+          this.set({ gap: true });
+          await cancellableDelay(1200 + countWords(line.text) * 420 / this.settings.speechRate, token);
+        } else {
+          await speak(line.text, this.voices.forCharacter(line.character), this.settings.speechRate, token);
+        }
+        await cancellableDelay(250, token);
+      }
+      this.set({ phase: 'finished', gap: false });
+      await releaseAudioSession();
+    } catch (err) {
+      if (isCancelled(err)) return;
+      console.warn('[listen] error', err);
+      this.set({ phase: 'error', error: toUserMessage(err) });
+    }
+  }
+
+  pause() {
+    this.cancel();
+    this.set({ phase: 'paused', gap: false });
+  }
+
+  skip(delta: number) {
+    const next = Math.max(0, Math.min(this.lines.length - 1, this.state.index + delta));
+    if (this.state.phase === 'playing') void this.play(next);
+    else this.set({ index: next, phase: this.state.phase === 'finished' ? 'paused' : this.state.phase });
+  }
+
+  async stop() {
+    this.cancel();
+    await releaseAudioSession();
+  }
+
+  private cancel() {
+    this.token?.cancel();
+    this.token = null;
+    stopSpeaking();
+  }
+}

@@ -28,6 +28,9 @@ No admin needed, just standard user role.
 | Screen | Purpose | Navigation |
 |--------|---------|------------|
 | Home       | Overview, and select practice lines or a warm up flashcards style        | practice lines with AI, flash cards, or listen to a script           | 
+|Run Lines| Review lines with the AI | back
+|Warm Up| Multiple choice flashcards of lines | Back
+|Listen | Listen to lines | Back
 
 ## Data Model
 

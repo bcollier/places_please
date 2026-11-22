@@ -1,0 +1,27 @@
+project_id = "places_please"
+
+[auth]
+# The app signs users in anonymously so there's no login screen.
+enable_anonymous_sign_ins = true
+
+[functions.places-ai]
+verify_jwt = true
+
+[auth.email]
+# Match hosted Supabase: new email addresses must be confirmed with a code.
+enable_confirmations = true
+otp_length = 8
+
+# Templates show a 6-digit code (the app has you type it in). Paste these into the hosted
+# dashboard too: Authentication › Emails › Templates.
+[auth.email.template.magic_link]
+subject = "Your Places, Please sign-in code"
+content_path = "./supabase/templates/magic_link.html"
+
+[auth.email.template.email_change]
+subject = "Confirm your email for Places, Please"
+content_path = "./supabase/templates/email_change.html"
+
+[auth.email.template.confirmation]
+subject = "Confirm your email for Places, Please"
+content_path = "./supabase/templates/confirmation.html"
