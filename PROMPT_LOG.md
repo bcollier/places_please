@@ -186,3 +186,11 @@ _(Sent mid-turn.)_
 ## 37. 2026-11-22
 
 > yes call this commit something like Fixes after AI review and push to github
+
+## 38. 2026-11-22
+
+> log all of my prompts in PROMPT_LOG.md if you have not been doing that already
+
+## 39. 2026-11-22
+
+> merge to main
