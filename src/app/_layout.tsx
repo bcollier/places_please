@@ -100,7 +100,7 @@ function AppStack() {
       <Stack.Screen name="scripts/[id]/listen" options={{ presentation: 'fullScreenModal', title: 'Listen', ...solidHeader }} />
       <Stack.Screen
         name="scripts/[id]/line/[lineId]"
-        options={{ presentation: 'formSheet', title: 'Edit Line', sheetAllowedDetents: [0.75, 1], sheetGrabberVisible: true }}
+        options={{ presentation: 'formSheet', title: 'Edit Line', sheetAllowedDetents: [0.75, 1], sheetGrabberVisible: true, ...solidHeader }}
       />
       <Stack.Screen name="account" options={{ presentation: 'modal', title: 'Account', ...solidHeader }} />
       <Stack.Screen name="history" options={{ title: 'Practice History' }} />
