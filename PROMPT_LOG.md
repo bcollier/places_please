@@ -242,3 +242,11 @@ _(Sent mid-turn.)_
 ## 51. 2026-11-22
 
 > push to github, make the commit say bug fixes and visual polish
+
+## 52. 2026-11-22
+
+> the API key is there
+
+## 53. 2026-11-22
+
+> go through the readme and take extensive screenshots, and add documentation about the data model, the user flow, and the tech stack. Go through the code and make sure it is "clean code", breaking up big functions into smaller ones and making sure everything is human readable
