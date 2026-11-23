@@ -5,6 +5,7 @@ import { Platform } from 'react-native';
 
 import { synthesizeSpeech } from '@/lib/ai';
 import { Cancellation } from '@/lib/audio/cancel';
+import { onBackgroundResume } from '@/lib/audio/session';
 import { AppError, CancelledError } from '@/lib/errors';
 import { countWords } from '@/lib/script-model';
 import type { Gender, VoiceEngine } from '@/lib/types';
@@ -266,6 +267,11 @@ export function resetCloudVoices() {
 }
 
 let currentPlayer: AudioPlayer | null = null;
+
+// If the line that's playing gets paused as the app goes to the background, pick it up again.
+onBackgroundResume(() => {
+  if (currentPlayer && !currentPlayer.playing) currentPlayer.play();
+});
 
 function playUri(uri: string, timeoutMs: number, token: Cancellation): Promise<void> {
   return new Promise((resolve, reject) => {

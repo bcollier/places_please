@@ -274,3 +274,15 @@ _(Sent mid-turn.)_
 ## 59. 2026-11-22
 
 > push to github
+
+## 60. 2026-11-22
+
+> whne i turn off the screen on the phone it stops playing
+
+## 61. 2026-11-22
+
+> it still stops even if I swipe up
+
+## 62. 2026-11-23
+
+> push to github
