@@ -11,6 +11,7 @@ import {
   readRecordingBase64,
   RECORDING_FORMAT,
   type ListenControls,
+  type ListenResult,
 } from '@/lib/audio/line-listener';
 import { configureAudioSession, releaseAudioSession, startKeepAlive } from '@/lib/audio/session';
 import { playSound, preloadSounds } from '@/lib/audio/sfx';
@@ -216,7 +217,6 @@ export class LineRunner {
   }
 
   private async loop(token: Cancellation) {
-    const rate = this.settings.speechRate;
     for (let i = this.state.index; i < this.lines.length; i++) {
       token.throwIfCancelled();
       const line = this.lines[i];
@@ -224,33 +224,42 @@ export class LineRunner {
       this.prefetchAfter(i);
 
       if (line.character !== this.me) {
-        this.set({ phase: 'partner', speaking: true });
-        await speak(line.text, this.voices!.forCharacter(line.character), rate, token);
-        this.set({ speaking: false });
+        await this.speakPartnerLine(line, token);
         continue;
       }
 
       const verdict = await this.runMyLine(line, i, token);
-      const mistake = verdict === 'missed' || verdict === 'close';
-      const pauseHere =
-        mistake && (this.settings.pauseOnMistake === 'all' || (this.settings.pauseOnMistake === 'missed' && verdict === 'missed'));
-
-      if (pauseHere) {
+      if (this.shouldPauseAfter(verdict)) {
         const choice = await this.waitForDecision(token);
         if (choice === 'retry') {
           // Replay the partner's cue (if there is one) and try the line again.
-          const cue = i > 0 && this.lines[i - 1].character !== this.me ? i - 1 : i;
-          i = cue - 1; // the loop's i++ lands on the cue
-          continue;
+          i = this.cueIndexFor(i) - 1; // the loop's i++ lands on the cue
         }
       } else {
         // Hands-free: leave a moment to take in a mistake before moving on.
-        await cancellableDelay(mistake ? 1200 : 350, token);
+        await cancellableDelay(isMistake(verdict) ? 1200 : 350, token);
       }
     }
 
     this.set({ phase: 'finished', speaking: false });
     await releaseAudioSession();
+  }
+
+  private async speakPartnerLine(line: ScriptLine, token: Cancellation) {
+    this.set({ phase: 'partner', speaking: true });
+    await speak(line.text, this.voices!.forCharacter(line.character), this.settings.speechRate, token);
+    this.set({ speaking: false });
+  }
+
+  /** Whether to stop and offer Try again / Keep going after this verdict. */
+  private shouldPauseAfter(verdict: LineAttempt['verdict']) {
+    const { pauseOnMistake } = this.settings;
+    return isMistake(verdict) && (pauseOnMistake === 'all' || (pauseOnMistake === 'missed' && verdict === 'missed'));
+  }
+
+  /** The partner line just before my line at `index`, or the line itself if there's no cue. */
+  private cueIndexFor(index: number) {
+    return index > 0 && this.lines[index - 1].character !== this.me ? index - 1 : index;
   }
 
   /** Download the next couple of partner lines while this one plays, so there's no gap. */
@@ -280,28 +289,15 @@ export class LineRunner {
     });
   }
 
+  /** Cue, listen, check and give feedback for one of my lines. */
   private async runMyLine(line: ScriptLine, index: number, token: Cancellation): Promise<LineAttempt['verdict']> {
-    const rate = this.settings.speechRate;
     this.controls = { stopRequested: false };
     this.forcePromptIndex = null;
 
     if (this.settings.cueSound) await playSound('cue');
     token.throwIfCancelled();
 
-    this.set({ phase: 'listening', last: null, level: 0 });
-    let recording;
-    try {
-      recording = await listenForLine(this.recorder, {
-        expectedWords: countWords(line.text),
-        pauseMs: PAUSE_MS[this.settings.pauseLength],
-        token,
-        controls: this.controls,
-        // dBFS (about -60 quiet room, -10 loud voice) to 0..1 for the on-screen voice meter.
-        onLevel: (db) => this.set({ level: Math.max(0, Math.min(1, (db + 58) / 45)) }),
-      });
-    } finally {
-      this.set({ level: 0 });
-    }
+    const recording = await this.recordMyLine(line, token);
     token.throwIfCancelled();
 
     const calledForLine = this.forcePromptIndex === index;
@@ -309,51 +305,11 @@ export class LineRunner {
 
     if (calledForLine || !recording.heardSpeech || !recording.uri) {
       deleteRecording(recording.uri);
-      result = {
-        lineId: line.id,
-        verdict: 'missed',
-        score: scoreLine(line.text, ''),
-        transcript: '',
-        note: calledForLine ? 'You called for the line.' : "Didn't hear anything.",
-      };
+      result = missedResult(line, calledForLine);
     } else {
-      this.set({ phase: 'checking' });
-      try {
-        const base64 = await readRecordingBase64(recording.uri);
-        const vocabulary = uniqueCharacters(this.lines).map((c) => c[0] + c.slice(1).toLowerCase());
-        const skipped = new Promise<never>((_, reject) => {
-          this.skipCheck = () => reject(new SkipCheckSignal());
-        });
-        const { transcript } = await Promise.race([
-          withRetry(() => transcribeAudio(base64, RECORDING_FORMAT, vocabulary), 2, 700),
-          skipped,
-        ]);
-        this.skipCheck = null;
-        token.throwIfCancelled();
-        const score = scoreLine(line.text, transcript);
-        result = { lineId: line.id, verdict: score.verdict, score, transcript };
-      } catch (err) {
-        this.skipCheck = null;
-        if (isCancelled(err)) throw err;
-        if (err instanceof AppError && err.code === 'not_allowed') throw err;
-        if (err instanceof SkipCheckSignal) {
-          deleteRecording(recording.uri);
-          this.recordAttempt({ lineId: line.id, verdict: 'skipped', accuracy: 0, transcript: '' });
-          this.set({ phase: 'feedback', last: { lineId: line.id, verdict: 'skipped', score: null, transcript: '', note: 'Skipped checking this line.' } });
-          return 'skipped';
-        }
-        // Don't punish the actor for a network hiccup: mark skipped, give the line, keep going.
-        console.warn('[runner] transcription failed', err);
-        result = {
-          lineId: line.id,
-          verdict: 'skipped',
-          score: null,
-          transcript: '',
-          note: `Couldn't check that line. ${toUserMessage(err)}`,
-        };
-      } finally {
-        deleteRecording(recording.uri);
-      }
+      const checked = await this.checkRecording(line, recording.uri, token);
+      if (!checked) return 'skipped';
+      result = checked;
     }
 
     this.recordAttempt({
@@ -364,25 +320,121 @@ export class LineRunner {
     });
     this.set({ phase: 'feedback', last: result });
 
-    if (result.verdict === 'perfect') {
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-      await playSound('perfect');
-    } else if (result.verdict === 'close') {
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
-      await playSound('close');
-    } else if (result.verdict === 'missed') {
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
-      await playSound('miss');
-    }
+    await playVerdictFeedback(result.verdict);
     token.throwIfCancelled();
 
     const shouldPrompt =
       result.verdict === 'skipped' || calledForLine || (result.verdict === 'missed' && this.settings.promptOnMiss);
-    if (shouldPrompt) {
-      this.set({ phase: 'prompting', speaking: true });
-      await speak(line.text, this.voices!.prompter, rate, token);
-      this.set({ speaking: false });
-    }
+    if (shouldPrompt) await this.promptLine(line, token);
     return result.verdict;
+  }
+
+  private async recordMyLine(line: ScriptLine, token: Cancellation): Promise<ListenResult> {
+    this.set({ phase: 'listening', last: null, level: 0 });
+    try {
+      return await listenForLine(this.recorder, {
+        expectedWords: countWords(line.text),
+        pauseMs: PAUSE_MS[this.settings.pauseLength],
+        token,
+        controls: this.controls,
+        onLevel: (db) => this.set({ level: dbToMeterLevel(db) }),
+      });
+    } finally {
+      this.set({ level: 0 });
+    }
+  }
+
+  /**
+   * Transcribes and scores the recording. Returns null when the actor skipped checking
+   * (that skip is already recorded and shown).
+   */
+  private async checkRecording(line: ScriptLine, uri: string, token: Cancellation): Promise<LastResult | null> {
+    this.set({ phase: 'checking' });
+    try {
+      const transcript = await this.transcribeUnlessSkipped(uri);
+      this.skipCheck = null;
+      token.throwIfCancelled();
+      const score = scoreLine(line.text, transcript);
+      return { lineId: line.id, verdict: score.verdict, score, transcript };
+    } catch (err) {
+      this.skipCheck = null;
+      if (isCancelled(err)) throw err;
+      if (err instanceof AppError && err.code === 'not_allowed') throw err;
+      if (err instanceof SkipCheckSignal) {
+        deleteRecording(uri);
+        this.showSkippedCheck(line);
+        return null;
+      }
+      // Don't punish the actor for a network hiccup: mark skipped, give the line, keep going.
+      console.warn('[runner] transcription failed', err);
+      return {
+        lineId: line.id,
+        verdict: 'skipped',
+        score: null,
+        transcript: '',
+        note: `Couldn't check that line. ${toUserMessage(err)}`,
+      };
+    } finally {
+      deleteRecording(uri);
+    }
+  }
+
+  /** Rejects with SkipCheckSignal if "Skip checking this line" is tapped before the transcript arrives. */
+  private async transcribeUnlessSkipped(uri: string): Promise<string> {
+    const base64 = await readRecordingBase64(uri);
+    const vocabulary = uniqueCharacters(this.lines).map((c) => c[0] + c.slice(1).toLowerCase());
+    const skipped = new Promise<never>((_, reject) => {
+      this.skipCheck = () => reject(new SkipCheckSignal());
+    });
+    const { transcript } = await Promise.race([
+      withRetry(() => transcribeAudio(base64, RECORDING_FORMAT, vocabulary), 2, 700),
+      skipped,
+    ]);
+    return transcript;
+  }
+
+  private showSkippedCheck(line: ScriptLine) {
+    this.recordAttempt({ lineId: line.id, verdict: 'skipped', accuracy: 0, transcript: '' });
+    this.set({ phase: 'feedback', last: { lineId: line.id, verdict: 'skipped', score: null, transcript: '', note: 'Skipped checking this line.' } });
+  }
+
+  /** Says my line for me in the prompter's voice. */
+  private async promptLine(line: ScriptLine, token: Cancellation) {
+    this.set({ phase: 'prompting', speaking: true });
+    await speak(line.text, this.voices!.prompter, this.settings.speechRate, token);
+    this.set({ speaking: false });
+  }
+}
+
+function isMistake(verdict: LineAttempt['verdict']) {
+  return verdict === 'missed' || verdict === 'close';
+}
+
+/** dBFS (about -60 quiet room, -10 loud voice) to 0..1 for the on-screen voice meter. */
+function dbToMeterLevel(db: number) {
+  return Math.max(0, Math.min(1, (db + 58) / 45));
+}
+
+function missedResult(line: ScriptLine, calledForLine: boolean): LastResult {
+  return {
+    lineId: line.id,
+    verdict: 'missed',
+    score: scoreLine(line.text, ''),
+    transcript: '',
+    note: calledForLine ? 'You called for the line.' : "Didn't hear anything.",
+  };
+}
+
+/** Haptic plus sound for a verdict; skipped lines stay quiet. */
+async function playVerdictFeedback(verdict: LineAttempt['verdict']) {
+  if (verdict === 'perfect') {
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    await playSound('perfect');
+  } else if (verdict === 'close') {
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+    await playSound('close');
+  } else if (verdict === 'missed') {
+    void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+    await playSound('miss');
   }
 }
