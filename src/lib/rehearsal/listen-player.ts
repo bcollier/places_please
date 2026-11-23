@@ -70,30 +70,12 @@ export class ListenPlayer {
     try {
       await configureAudioSession('listen');
       startKeepAlive();
-      if (!this.voices || this.recast) {
-        this.recast = false;
-        this.voices = await castVoices({
-          characters: uniqueCharacters(this.lines),
-          me: this.me,
-          genders: this.genders,
-          engine: this.settings.voiceEngine,
-        });
-      }
+      const voices = await this.currentVoices();
       for (let i = fromIndex; i < this.lines.length; i++) {
         token.throwIfCancelled();
-        const line = this.lines[i];
         this.set({ index: i, gap: false });
-        for (const next of this.lines.slice(i + 1, i + 3)) {
-          if (next.character !== this.me || this.settings.listenReadsMyLines) {
-            prefetchSpeech(next.text, this.voices.forCharacter(next.character), this.settings.speechRate);
-          }
-        }
-        if (line.character === this.me && !this.settings.listenReadsMyLines) {
-          this.set({ gap: true });
-          await cancellableDelay(1200 + countWords(line.text) * 420 / this.settings.speechRate, token);
-        } else {
-          await speak(line.text, this.voices.forCharacter(line.character), this.settings.speechRate, token);
-        }
+        this.prefetchAfter(i, voices);
+        await this.performLine(this.lines[i], voices, token);
         this.heard.add(i);
         await cancellableDelay(250, token);
       }
@@ -101,11 +83,52 @@ export class ListenPlayer {
       await releaseAudioSession();
     } catch (err) {
       if (isCancelled(err)) return;
-      console.warn('[listen] error', err);
-      this.cancel();
-      await releaseAudioSession();
-      this.set({ phase: 'error', error: toUserMessage(err) });
+      await this.fail(err);
     }
+  }
+
+  /** Casts voices on the first play, and again after the genders change. */
+  private async currentVoices(): Promise<VoiceCast> {
+    if (!this.voices || this.recast) {
+      this.recast = false;
+      this.voices = await castVoices({
+        characters: uniqueCharacters(this.lines),
+        me: this.me,
+        genders: this.genders,
+        engine: this.settings.voiceEngine,
+      });
+    }
+    return this.voices;
+  }
+
+  /** Starts downloading the next two lines that will be spoken, so they play without a pause. */
+  private prefetchAfter(index: number, voices: VoiceCast) {
+    for (const next of this.lines.slice(index + 1, index + 3)) {
+      if (this.isSpoken(next)) {
+        prefetchSpeech(next.text, voices.forCharacter(next.character), this.settings.speechRate);
+      }
+    }
+  }
+
+  /** Speaks the line, or stays silent long enough for the actor to say their own line. */
+  private async performLine(line: ScriptLine, voices: VoiceCast, token: Cancellation) {
+    if (this.isSpoken(line)) {
+      await speak(line.text, voices.forCharacter(line.character), this.settings.speechRate, token);
+    } else {
+      this.set({ gap: true });
+      await cancellableDelay(gapDuration(line.text, this.settings.speechRate), token);
+    }
+  }
+
+  private isSpoken(line: ScriptLine) {
+    return line.character !== this.me || this.settings.listenReadsMyLines;
+  }
+
+  private async fail(err: unknown) {
+    console.warn('[listen] error', err);
+    this.cancel();
+    await releaseAudioSession();
+    this.set({ phase: 'error', error: toUserMessage(err) });
   }
 
   pause() {
@@ -129,4 +152,9 @@ export class ListenPlayer {
     this.token = null;
     stopSpeaking();
   }
+}
+
+/** How long to stay silent for the actor's own line: a beat, plus time to say each word at this rate. */
+function gapDuration(text: string, speechRate: number) {
+  return 1200 + (countWords(text) * 420) / speechRate;
 }
