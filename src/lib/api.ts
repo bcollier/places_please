@@ -1,4 +1,4 @@
-import type { PostgrestError } from '@supabase/supabase-js';
+import type { PostgrestError, SupabaseClient } from '@supabase/supabase-js';
 
 import { AppError, withRetry } from '@/lib/errors';
 import { sanitizeGenders, sanitizeSettings } from '@/lib/sanitize';
@@ -179,35 +179,52 @@ export function summarizeAttempts(attempts: LineAttempt[]) {
 
 export async function savePracticeSession(session: NewPracticeSession): Promise<void> {
   const ended = new Date();
-  const { perfect, close, missed, score } = summarizeAttempts(session.attempts);
+  const summary = summarizeAttempts(session.attempts);
   await withRetry(async () => {
-    const supabase = getSupabase();
-    const { error } = await supabase.from('places_practice_history').insert({
-      script_id: session.script_id,
-      mode: session.mode,
-      character: session.character,
-      scene: session.scene,
-      started_at: session.started_at.toISOString(),
-      ended_at: ended.toISOString(),
-      duration_seconds: Math.max(0, Math.round((ended.getTime() - session.started_at.getTime()) / 1000)),
-      lines_total: session.lines_total,
-      perfect_count: perfect,
-      close_count: close,
-      missed_count: missed,
-      score,
-      // Transcripts are only kept for missed/close lines, and trimmed.
-      details: session.attempts.slice(0, 500).map((a) => ({
-        lineId: a.lineId,
-        verdict: a.verdict,
-        accuracy: Math.round(a.accuracy * 100) / 100,
-        ...(a.transcript && a.verdict !== 'perfect' ? { transcript: a.transcript.slice(0, 500) } : {}),
-      })),
-    });
+    const { error } = await getSupabase()
+      .from('places_practice_history')
+      .insert(toPracticeHistoryRow(session, summary, ended));
     if (error) dbError(error, 'save this practice session');
   });
-  // Best effort: keep the script's "last practiced" fresh for the home screen.
+  await touchLastPracticed(session.script_id, ended);
+}
+
+function toPracticeHistoryRow(
+  session: NewPracticeSession,
+  { perfect, close, missed, score }: ReturnType<typeof summarizeAttempts>,
+  ended: Date,
+) {
+  return {
+    script_id: session.script_id,
+    mode: session.mode,
+    character: session.character,
+    scene: session.scene,
+    started_at: session.started_at.toISOString(),
+    ended_at: ended.toISOString(),
+    duration_seconds: Math.max(0, Math.round((ended.getTime() - session.started_at.getTime()) / 1000)),
+    lines_total: session.lines_total,
+    perfect_count: perfect,
+    close_count: close,
+    missed_count: missed,
+    score,
+    details: toAttemptDetails(session.attempts),
+  };
+}
+
+/** Transcripts are only kept for missed/close lines, and trimmed. */
+function toAttemptDetails(attempts: LineAttempt[]) {
+  return attempts.slice(0, 500).map((a) => ({
+    lineId: a.lineId,
+    verdict: a.verdict,
+    accuracy: Math.round(a.accuracy * 100) / 100,
+    ...(a.transcript && a.verdict !== 'perfect' ? { transcript: a.transcript.slice(0, 500) } : {}),
+  }));
+}
+
+/** Best effort: keeps the script's "last practiced" fresh for the home screen. */
+async function touchLastPracticed(scriptId: string, at: Date) {
   try {
-    await getSupabase().from('places_scripts').update({ last_practiced_at: ended.toISOString() }).eq('id', session.script_id);
+    await getSupabase().from('places_scripts').update({ last_practiced_at: at.toISOString() }).eq('id', scriptId);
   } catch {
     // not critical
   }
@@ -281,29 +298,71 @@ export async function importGuestData(
   onProgress: (progress: MergeProgress) => Promise<void>,
 ): Promise<number> {
   const supabase = getSupabase();
-  for (const s of snapshot.scripts) {
+  const afterScripts = await copyGuestScripts(supabase, snapshot.scripts, progress, onProgress);
+  await copyGuestHistory(supabase, snapshot.history, afterScripts, onProgress);
+  return snapshot.scripts.length;
+}
+
+/** Copies each script not yet copied, recording old id -> new id. Returns the updated progress. */
+async function copyGuestScripts(
+  supabase: SupabaseClient,
+  scripts: Script[],
+  progress: MergeProgress,
+  onProgress: (progress: MergeProgress) => Promise<void>,
+): Promise<MergeProgress> {
+  for (const s of scripts) {
     if (progress.scriptIds[s.id]) continue; // already copied on an earlier try
-    const { data, error } = await supabase
-      .from('places_scripts')
-      .insert({
-        title: s.title,
-        lines: s.lines,
-        characters: s.characters,
-        character_genders: s.character_genders,
-        my_character: s.my_character,
-        source_type: s.source_type,
-        last_practiced_at: s.last_practiced_at,
-      })
-      .select('id')
-      .single();
-    if (error || !data) dbError(error, 'copy your scripts');
-    progress = { ...progress, scriptIds: { ...progress.scriptIds, [s.id]: data.id as string } };
+    const newId = await insertGuestScript(supabase, s);
+    progress = { ...progress, scriptIds: { ...progress.scriptIds, [s.id]: newId } };
     await onProgress(progress);
   }
-  const rows = snapshot.history
-    .filter((h) => !h.script_id || progress.scriptIds[h.script_id])
+  return progress;
+}
+
+async function insertGuestScript(supabase: SupabaseClient, s: Script): Promise<string> {
+  const { data, error } = await supabase
+    .from('places_scripts')
+    .insert({
+      title: s.title,
+      lines: s.lines,
+      characters: s.characters,
+      character_genders: s.character_genders,
+      my_character: s.my_character,
+      source_type: s.source_type,
+      last_practiced_at: s.last_practiced_at,
+    })
+    .select('id')
+    .single();
+  if (error || !data) dbError(error, 'copy your scripts');
+  return data.id as string;
+}
+
+const HISTORY_CHUNK_SIZE = 200;
+
+/** Inserts history in chunks, skipping chunks already done on an earlier try. */
+async function copyGuestHistory(
+  supabase: SupabaseClient,
+  history: PracticeSession[],
+  progress: MergeProgress,
+  onProgress: (progress: MergeProgress) => Promise<void>,
+): Promise<void> {
+  const rows = toCopiedHistoryRows(history, progress.scriptIds);
+  for (let chunk = progress.historyChunksDone; chunk * HISTORY_CHUNK_SIZE < rows.length; chunk++) {
+    const { error } = await supabase
+      .from('places_practice_history')
+      .insert(rows.slice(chunk * HISTORY_CHUNK_SIZE, (chunk + 1) * HISTORY_CHUNK_SIZE));
+    if (error) dbError(error, 'copy your practice history');
+    progress = { ...progress, historyChunksDone: chunk + 1 };
+    await onProgress(progress);
+  }
+}
+
+/** History rows pointed at the copied scripts; sessions for scripts that weren't copied are dropped. */
+function toCopiedHistoryRows(history: PracticeSession[], scriptIds: MergeProgress['scriptIds']) {
+  return history
+    .filter((h) => !h.script_id || scriptIds[h.script_id])
     .map((h) => ({
-      script_id: h.script_id ? progress.scriptIds[h.script_id] : null,
+      script_id: h.script_id ? scriptIds[h.script_id] : null,
       mode: h.mode,
       character: h.character,
       scene: h.scene,
@@ -317,12 +376,4 @@ export async function importGuestData(
       score: h.score,
       details: h.details,
     }));
-  const CHUNK = 200;
-  for (let chunk = progress.historyChunksDone; chunk * CHUNK < rows.length; chunk++) {
-    const { error } = await supabase.from('places_practice_history').insert(rows.slice(chunk * CHUNK, (chunk + 1) * CHUNK));
-    if (error) dbError(error, 'copy your practice history');
-    progress = { ...progress, historyChunksDone: chunk + 1 };
-    await onProgress(progress);
-  }
-  return snapshot.scripts.length;
 }
