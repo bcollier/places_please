@@ -61,6 +61,123 @@ export type ListenControls = {
   stopRequested: boolean;
 };
 
+type LevelCallback = (level: number, speaking: boolean) => void;
+
+const POLL_INTERVAL_MS = 100;
+const NO_SPEECH_TIMEOUT_MS = 8000;
+/** The first readings are taken as the room's noise floor, before listening for speech. */
+const FLOOR_CALIBRATION_MS = 350;
+
+/** Hard cap on one recording, scaled to the line's length. */
+function maxListenMs(expectedWords: number) {
+  return Math.min(120_000, 6000 + expectedWords * 900);
+}
+
+/** How long to record when the device has no level meter. */
+function fallbackListenMs(expectedWords: number) {
+  return 2500 + expectedWords * 500;
+}
+
+function medianLevel(samples: number[]) {
+  const sorted = [...samples].sort((a, b) => a - b);
+  return sorted.length ? sorted[Math.floor(sorted.length / 2)] : -60;
+}
+
+/** Speech is anything clearly above the noise floor, within sane bounds. */
+function speechThreshold(floor: number) {
+  return Math.min(-22, Math.max(-48, floor + 12));
+}
+
+function meteringLevel(recorder: AudioRecorder): number | null {
+  const status = recorder.getStatus();
+  return typeof status.metering === 'number' ? status.metering : null;
+}
+
+/** Voice-activity detection: fed one meter reading per poll, it decides when the actor has finished. */
+class SpeechDetector {
+  speechStarted = false;
+  private floor: number | null = null;
+  private floorSamples: number[] = [];
+  private loudStreak = 0;
+  private lastLoudAt = 0;
+  private meteringSeen = false;
+
+  constructor(
+    private pauseMs: number,
+    private fallbackMs: number,
+    private onLevel?: LevelCallback,
+  ) {}
+
+  shouldStop(level: number | null, elapsed: number, now: number): boolean {
+    if (level === null) return this.noMeteringTimedOut(elapsed);
+    this.meteringSeen = true;
+
+    if (elapsed < FLOOR_CALIBRATION_MS) {
+      this.floorSamples.push(level);
+      return false;
+    }
+    const floor = (this.floor ??= medianLevel(this.floorSamples));
+    const loud = level > speechThreshold(floor);
+    this.onLevel?.(level, loud);
+    this.trackLoudness(level, loud, floor, now);
+
+    if (!this.speechStarted) return elapsed > NO_SPEECH_TIMEOUT_MS;
+    return now - this.lastLoudAt > this.pauseMs;
+  }
+
+  private noMeteringTimedOut(elapsed: number) {
+    // No metering on this device: stop after a time based on the line's length.
+    if (!this.meteringSeen && elapsed > this.fallbackMs) {
+      this.speechStarted = true;
+      return true;
+    }
+    return false;
+  }
+
+  private trackLoudness(level: number, loud: boolean, floor: number, now: number) {
+    if (loud) {
+      this.loudStreak += 1;
+      this.lastLoudAt = now;
+      if (this.loudStreak >= 2) this.speechStarted = true;
+    } else {
+      this.loudStreak = 0;
+      // Slowly track the noise floor while quiet (e.g. walking into a noisier street).
+      if (!this.speechStarted) this.floor = floor * 0.95 + level * 0.05;
+    }
+  }
+}
+
+/** Calls `isDone` every poll until it returns true. Rejects if cancelled or if `isDone` throws. */
+function pollUntil(token: Cancellation, isDone: () => boolean): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const off = token.onCancel(() => {
+      clearInterval(interval);
+      reject(new CancelledError());
+    });
+    const interval = setInterval(() => {
+      try {
+        if (!isDone()) return;
+        clearInterval(interval);
+        off();
+        resolve();
+      } catch (err) {
+        clearInterval(interval);
+        off();
+        reject(err);
+      }
+    }, POLL_INTERVAL_MS);
+  });
+}
+
+async function stopRecorder(recorder: AudioRecorder) {
+  try {
+    await recorder.stop();
+  } catch (err) {
+    // Leaving the screen mid-line releases the recorder first; nothing left to stop.
+    if (!/shared object/i.test(String(err))) console.warn('[listen] stop failed', err);
+  }
+}
+
 /**
  * Records until the actor stops talking.
  * Uses the recorder's level meter with an adaptive noise floor so it works on a quiet stage or a
@@ -73,7 +190,7 @@ export async function listenForLine(
     pauseMs: number;
     token: Cancellation;
     controls: ListenControls;
-    onLevel?: (level: number, speaking: boolean) => void;
+    onLevel?: LevelCallback;
   },
 ): Promise<ListenResult> {
   const { token, controls } = opts;
@@ -83,92 +200,23 @@ export async function listenForLine(
   recorder.record();
   const started = Date.now();
 
-  const maxMs = Math.min(120_000, 6000 + opts.expectedWords * 900);
-  const noSpeechTimeoutMs = 8000;
-  const fallbackMs = 2500 + opts.expectedWords * 500;
-
-  let floor: number | null = null;
-  const floorSamples: number[] = [];
-  let speechStarted = false;
-  let loudStreak = 0;
-  let lastLoudAt = 0;
-  let meteringSeen = false;
+  const maxMs = maxListenMs(opts.expectedWords);
+  const detector = new SpeechDetector(opts.pauseMs, fallbackListenMs(opts.expectedWords), opts.onLevel);
 
   try {
-    await new Promise<void>((resolve, reject) => {
-      const off = token.onCancel(() => {
-        clearInterval(interval);
-        reject(new CancelledError());
-      });
-      const interval = setInterval(() => {
-        try {
-          const now = Date.now();
-          const elapsed = now - started;
-          const end = () => {
-            clearInterval(interval);
-            off();
-            resolve();
-          };
-
-          if (controls.stopRequested) return end();
-          if (elapsed > maxMs) return end();
-
-          const status = recorder.getStatus();
-          const level = typeof status.metering === 'number' ? status.metering : null;
-
-          if (level === null) {
-            // No metering on this device: stop after a time based on the line's length.
-            if (!meteringSeen && elapsed > fallbackMs) {
-              speechStarted = true;
-              return end();
-            }
-            return;
-          }
-          meteringSeen = true;
-
-          if (elapsed < 350) {
-            floorSamples.push(level);
-            return;
-          }
-          if (floor === null) {
-            const sorted = [...floorSamples].sort((a, b) => a - b);
-            floor = sorted.length ? sorted[Math.floor(sorted.length / 2)] : -60;
-          }
-          const threshold = Math.min(-22, Math.max(-48, floor + 12));
-          const loud = level > threshold;
-          opts.onLevel?.(level, loud);
-
-          if (loud) {
-            loudStreak += 1;
-            lastLoudAt = now;
-            if (loudStreak >= 2) speechStarted = true;
-          } else {
-            loudStreak = 0;
-            // Slowly track the noise floor while quiet (e.g. walking into a noisier street).
-            if (!speechStarted) floor = floor * 0.95 + level * 0.05;
-          }
-
-          if (!speechStarted && elapsed > noSpeechTimeoutMs) return end();
-          if (speechStarted && now - lastLoudAt > opts.pauseMs) return end();
-        } catch (err) {
-          clearInterval(interval);
-          off();
-          reject(err);
-        }
-      }, 100);
+    await pollUntil(token, () => {
+      const now = Date.now();
+      const elapsed = now - started;
+      if (controls.stopRequested || elapsed > maxMs) return true;
+      return detector.shouldStop(meteringLevel(recorder), elapsed, now);
     });
   } finally {
-    try {
-      await recorder.stop();
-    } catch (err) {
-      // Leaving the screen mid-line releases the recorder first; nothing left to stop.
-      if (!/shared object/i.test(String(err))) console.warn('[listen] stop failed', err);
-    }
+    await stopRecorder(recorder);
   }
 
   return {
     uri: recorder.uri ?? recorder.getStatus().url ?? null,
-    heardSpeech: speechStarted || controls.stopRequested,
+    heardSpeech: detector.speechStarted || controls.stopRequested,
     durationMs: Date.now() - started,
   };
 }

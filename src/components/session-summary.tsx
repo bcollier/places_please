@@ -26,59 +26,26 @@ export function SessionSummary({
   onDone: () => void;
   headline?: string;
 }) {
-  const theme = useTheme();
   const { perfect, close, missed, score } = summarizeAttempts(attempts);
-  const missedLines = attempts
-    .filter((a) => a.verdict === 'missed' || a.verdict === 'close')
-    .map((a) => ({ attempt: a, line: lines.find((l) => l.id === a.lineId) }))
-    .filter((x): x is { attempt: LineAttempt; line: ScriptLine } => !!x.line);
-
-  const title =
-    headline ??
-    (score === null ? 'Scene complete' : score >= 95 ? 'Bravo!' : score >= 75 ? 'Nicely done' : score >= 50 ? 'Getting there' : 'Keep at it');
+  const missedLines = linesToWorkOn(attempts, lines);
 
   return (
     <View style={styles.wrap}>
       <Text variant="overline" color="primary">
         Curtain
       </Text>
-      <Text variant="display">{title}</Text>
+      <Text variant="display">{headline ?? titleForScore(score)}</Text>
       {score !== null ? (
         <Text variant="body" color="textSecondary">
           Score {score}%
         </Text>
       ) : null}
 
-      <View style={styles.counts}>
-        <Count label="Perfect" value={perfect} color={theme.perfect} bg={theme.perfectSoft} />
-        <Count label="Close" value={close} color={theme.close} bg={theme.closeSoft} />
-        <Count label="Missed" value={missed} color={theme.miss} bg={theme.missSoft} />
-      </View>
+      <VerdictCounts perfect={perfect} close={close} missed={missed} />
 
-      {missedLines.length > 0 ? (
-        <View style={styles.review}>
-          <Text variant="overline">Lines to work on</Text>
-          {missedLines.slice(0, 12).map(({ attempt, line }) => (
-            <Card key={line.id} style={styles.reviewCard}>
-              <Text variant="script" style={styles.reviewText}>
-                {line.text}
-              </Text>
-              {attempt.transcript ? (
-                <Text variant="caption">You said: “{attempt.transcript}”</Text>
-              ) : null}
-            </Card>
-          ))}
-        </View>
-      ) : null}
+      {missedLines.length > 0 ? <LinesToWorkOn items={missedLines} /> : null}
 
-      {saveError ? (
-        <View style={styles.saveError}>
-          <Text variant="caption" color="miss">
-            {saveError}
-          </Text>
-          {onRetrySave ? <Button title="Try saving again" size="small" variant="secondary" onPress={onRetrySave} /> : null}
-        </View>
-      ) : null}
+      {saveError ? <SaveErrorNotice message={saveError} onRetry={onRetrySave} /> : null}
 
       <SaveAccountPrompt />
 
@@ -86,6 +53,62 @@ export function SessionSummary({
         <Button title="Run it again" icon="arrow.clockwise" onPress={onAgain} />
         <Button title="Done" variant="secondary" onPress={onDone} />
       </View>
+    </View>
+  );
+}
+
+type MissedLine = { attempt: LineAttempt; line: ScriptLine };
+
+/** Close and missed attempts, paired with their script lines. */
+function linesToWorkOn(attempts: LineAttempt[], lines: ScriptLine[]): MissedLine[] {
+  return attempts
+    .filter((a) => a.verdict === 'missed' || a.verdict === 'close')
+    .map((a) => ({ attempt: a, line: lines.find((l) => l.id === a.lineId) }))
+    .filter((x): x is MissedLine => !!x.line);
+}
+
+function titleForScore(score: number | null) {
+  if (score === null) return 'Scene complete';
+  if (score >= 95) return 'Bravo!';
+  if (score >= 75) return 'Nicely done';
+  if (score >= 50) return 'Getting there';
+  return 'Keep at it';
+}
+
+function VerdictCounts({ perfect, close, missed }: { perfect: number; close: number; missed: number }) {
+  const theme = useTheme();
+  return (
+    <View style={styles.counts}>
+      <Count label="Perfect" value={perfect} color={theme.perfect} bg={theme.perfectSoft} />
+      <Count label="Close" value={close} color={theme.close} bg={theme.closeSoft} />
+      <Count label="Missed" value={missed} color={theme.miss} bg={theme.missSoft} />
+    </View>
+  );
+}
+
+function LinesToWorkOn({ items }: { items: MissedLine[] }) {
+  return (
+    <View style={styles.review}>
+      <Text variant="overline">Lines to work on</Text>
+      {items.slice(0, 12).map(({ attempt, line }) => (
+        <Card key={line.id} style={styles.reviewCard}>
+          <Text variant="script" style={styles.reviewText}>
+            {line.text}
+          </Text>
+          {attempt.transcript ? <Text variant="caption">You said: “{attempt.transcript}”</Text> : null}
+        </Card>
+      ))}
+    </View>
+  );
+}
+
+function SaveErrorNotice({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  return (
+    <View style={styles.saveError}>
+      <Text variant="caption" color="miss">
+        {message}
+      </Text>
+      {onRetry ? <Button title="Try saving again" size="small" variant="secondary" onPress={onRetry} /> : null}
     </View>
   );
 }

@@ -10,6 +10,12 @@ const useNative = Platform.OS !== 'web';
 
 type Mode = 'listening' | 'speaking' | 'idle';
 
+const ACCESSIBILITY_LABELS: Record<Mode, string> = {
+  listening: 'Listening to you',
+  speaking: 'Scene partner speaking',
+  idle: 'Waiting',
+};
+
 /**
  * Animated bars. While listening they follow the live microphone level; while the scene partner
  * speaks they pulse on their own; otherwise they rest.
@@ -17,8 +23,25 @@ type Mode = 'listening' | 'speaking' | 'idle';
 export function VoiceMeter({ mode, level, height = 64 }: { mode: Mode; level: number; height?: number }) {
   const theme = useTheme();
   const [bars] = useState(() => Array.from({ length: BARS }, () => new Animated.Value(0.12)));
+  useFollowMicLevel(bars, mode, level);
+  usePulseOrRest(bars, mode);
 
-  // Listening: follow the mic level, with a little per-bar variation so it looks alive.
+  const color = mode === 'listening' ? theme.primary : mode === 'speaking' ? theme.textSecondary : theme.border;
+
+  return (
+    <View style={[styles.row, { height }]} accessibilityRole="image" accessibilityLabel={ACCESSIBILITY_LABELS[mode]}>
+      {bars.map((bar, i) => (
+        <Animated.View
+          key={i}
+          style={[styles.bar, { height, backgroundColor: color, transform: [{ scaleY: bar }] }]}
+        />
+      ))}
+    </View>
+  );
+}
+
+/** Listening: follow the mic level, with a little per-bar variation so it looks alive. */
+function useFollowMicLevel(bars: Animated.Value[], mode: Mode, level: number) {
   useEffect(() => {
     if (mode !== 'listening') return;
     const loud = Math.max(0.08, level);
@@ -32,8 +55,10 @@ export function VoiceMeter({ mode, level, height = 64 }: { mode: Mode; level: nu
     );
     Animated.parallel(animations).start();
   }, [mode, level, bars]);
+}
 
-  // Partner speaking: a gentle looping wave. Idle: settle down.
+/** Partner speaking: a gentle looping wave. Idle: settle down. */
+function usePulseOrRest(bars: Animated.Value[], mode: Mode) {
   useEffect(() => {
     if (mode === 'listening') return;
     if (mode === 'idle') {
@@ -42,43 +67,21 @@ export function VoiceMeter({ mode, level, height = 64 }: { mode: Mode; level: nu
       ).start();
       return;
     }
-    const loops = bars.map((bar, i) =>
-      Animated.loop(
-        Animated.sequence([
-          Animated.delay(i * 70),
-          Animated.timing(bar, {
-            toValue: 0.25 + SHAPE[i] * 0.45,
-            duration: 380,
-            easing: Easing.inOut(Easing.sin),
-            useNativeDriver: useNative,
-          }),
-          Animated.timing(bar, {
-            toValue: 0.15,
-            duration: 380,
-            easing: Easing.inOut(Easing.sin),
-            useNativeDriver: useNative,
-          }),
-        ]),
-      ),
-    );
+    const loops = bars.map(pulseLoop);
     loops.forEach((l) => l.start());
     return () => loops.forEach((l) => l.stop());
   }, [mode, bars]);
+}
 
-  const color = mode === 'listening' ? theme.primary : mode === 'speaking' ? theme.textSecondary : theme.border;
-
-  return (
-    <View
-      style={[styles.row, { height }]}
-      accessibilityRole="image"
-      accessibilityLabel={mode === 'listening' ? 'Listening to you' : mode === 'speaking' ? 'Scene partner speaking' : 'Waiting'}>
-      {bars.map((bar, i) => (
-        <Animated.View
-          key={i}
-          style={[styles.bar, { height, backgroundColor: color, transform: [{ scaleY: bar }] }]}
-        />
-      ))}
-    </View>
+/** One bar's rise-and-fall, staggered by its position so the wave travels across. */
+function pulseLoop(bar: Animated.Value, i: number) {
+  const ease = Easing.inOut(Easing.sin);
+  return Animated.loop(
+    Animated.sequence([
+      Animated.delay(i * 70),
+      Animated.timing(bar, { toValue: 0.25 + SHAPE[i] * 0.45, duration: 380, easing: ease, useNativeDriver: useNative }),
+      Animated.timing(bar, { toValue: 0.15, duration: 380, easing: ease, useNativeDriver: useNative }),
+    ]),
   );
 }
 
