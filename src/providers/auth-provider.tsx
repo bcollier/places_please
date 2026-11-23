@@ -1,4 +1,4 @@
-import type { User } from '@supabase/supabase-js';
+import type { SupabaseClient, User } from '@supabase/supabase-js';
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { accountInfo, type AccountInfo } from '@/lib/account';
@@ -23,42 +23,52 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 
 const LOADING: AuthState = { status: 'loading', userId: null, user: null, error: null };
 
+function readyState(user: User): AuthState {
+  return { status: 'ready', userId: user.id, user, error: null };
+}
+
+function errorState(err: unknown): AuthState {
+  const fatal = (err as { fatal?: boolean })?.fatal;
+  return {
+    status: 'error',
+    userId: null,
+    user: null,
+    error: fatal ? (err as Error).message : toUserMessage(err, "Couldn't connect. Check your internet connection."),
+  };
+}
+
+/** The saved session's user, or a new guest (anonymous) user when there is no session. */
+async function currentOrGuestUser(supabase: SupabaseClient): Promise<User> {
+  const { data: sessionData } = await supabase.auth.getSession();
+  if (sessionData.session?.user) return sessionData.session.user;
+  const { data, error } = await supabase.auth.signInAnonymously();
+  if (error || !data.user) {
+    if (error && /anonymous/i.test(error.message)) {
+      // Not retryable: a project setting.
+      throw Object.assign(
+        new Error('Anonymous sign-ins are disabled in Supabase. Enable them under Authentication › Providers.'),
+        { fatal: true },
+      );
+    }
+    throw error ?? new Error('Sign-in failed');
+  }
+  return data.user;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>(LOADING);
+  // Only the latest sign-in attempt may set the state; older ones finishing late are ignored.
   const attempt = useRef(0);
 
   const signIn = useCallback(async () => {
     const thisAttempt = ++attempt.current;
     try {
       const supabase = getSupabase();
-      const user = await withRetry(async () => {
-        const { data: sessionData } = await supabase.auth.getSession();
-        if (sessionData.session?.user) return sessionData.session.user;
-        const { data, error } = await supabase.auth.signInAnonymously();
-        if (error || !data.user) {
-          if (error && /anonymous/i.test(error.message)) {
-            // Not retryable: a project setting.
-            throw Object.assign(
-              new Error('Anonymous sign-ins are disabled in Supabase. Enable them under Authentication › Providers.'),
-              { fatal: true },
-            );
-          }
-          throw error ?? new Error('Sign-in failed');
-        }
-        return data.user;
-      });
-      if (thisAttempt === attempt.current) setState({ status: 'ready', userId: user.id, user, error: null });
+      const user = await withRetry(() => currentOrGuestUser(supabase));
+      if (thisAttempt === attempt.current) setState(readyState(user));
     } catch (err) {
       console.warn('[auth] sign-in failed', err);
-      const fatal = (err as { fatal?: boolean })?.fatal;
-      if (thisAttempt === attempt.current) {
-        setState({
-          status: 'error',
-          userId: null,
-          user: null,
-          error: fatal ? (err as Error).message : toUserMessage(err, "Couldn't connect. Check your internet connection."),
-        });
-      }
+      if (thisAttempt === attempt.current) setState(errorState(err));
     }
   }, []);
 
@@ -76,7 +86,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (session?.user) {
         // Covers signing in to another account and linking a login (USER_UPDATED).
         attempt.current++;
-        setState({ status: 'ready', userId: session.user.id, user: session.user, error: null });
+        setState(readyState(session.user));
       }
     });
     return () => data.subscription.unsubscribe();

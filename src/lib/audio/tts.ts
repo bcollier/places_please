@@ -120,40 +120,73 @@ export async function castVoices(options: {
 }): Promise<VoiceCast> {
   const { characters, me, genders = {}, engine } = options;
   const deviceVoices = await getVoices();
-  const femaleDevice = deviceVoices.filter((v) => deviceVoiceGender(v) === 'female');
-  const maleDevice = deviceVoices.filter((v) => deviceVoiceGender(v) === 'male');
   const useCloud = engine === 'elevenlabs';
-  const order = [...characters.filter((c) => c !== me), ...(me && characters.includes(me) ? [me] : [])];
+  const cast = assignVoices(castingOrder(characters, me), genders, deviceVoices, useCloud);
+  return {
+    forCharacter: (name: string) => cast.get(name) ?? { cloud: useCloud ? FEMALE_VOICES[0] : null, device: { pitch: 1 } },
+    prompter: prompterVoice(deviceVoices, useCloud),
+  };
+}
 
-  const map = new Map<string, VoiceChoice>();
-  let f = 0;
-  let m = 0;
+type VoiceGender = 'female' | 'male';
+
+/** Scene partners first and `me` last, so the partners get the best voices. */
+function castingOrder(characters: string[], me: string | null): string[] {
+  return [...characters.filter((c) => c !== me), ...(me && characters.includes(me) ? [me] : [])];
+}
+
+function assignVoices(
+  order: string[],
+  genders: Record<string, Gender>,
+  deviceVoices: Speech.Voice[],
+  useCloud: boolean,
+): Map<string, VoiceChoice> {
+  const devicePools: Record<VoiceGender, Speech.Voice[]> = {
+    female: deviceVoices.filter((v) => deviceVoiceGender(v) === 'female'),
+    male: deviceVoices.filter((v) => deviceVoiceGender(v) === 'male'),
+  };
+  const nextSlot: Record<VoiceGender, number> = { female: 0, male: 0 };
   let unknownToggle = 0;
+  const cast = new Map<string, VoiceChoice>();
   order.forEach((name, i) => {
-    let gender = genders[name] ?? 'unknown';
-    if (gender === 'unknown') gender = unknownToggle++ % 2 === 0 ? 'female' : 'male';
-    const slot = gender === 'female' ? f++ : m++;
-    const cloud = gender === 'female' ? FEMALE_VOICES[slot % FEMALE_VOICES.length] : MALE_VOICES[slot % MALE_VOICES.length];
-    const pool = gender === 'female' ? femaleDevice : maleDevice;
-    const device = pool.length
-      ? { voice: pool[slot % pool.length].identifier, pitch: PITCHES[Math.floor(slot / pool.length) % PITCHES.length] }
-      : deviceVoices.length
-        ? {
-            voice: deviceVoices[i % deviceVoices.length].identifier,
-            // No voice of the right gender installed: nudge the pitch instead.
-            pitch: gender === 'male' ? 0.85 : 1.1,
-          }
-        : { pitch: gender === 'male' ? 0.85 : 1.1 };
-    map.set(name, { cloud: useCloud ? cloud : null, device });
+    const known = genders[name] ?? 'unknown';
+    const gender: VoiceGender = known !== 'unknown' ? known : unknownToggle++ % 2 === 0 ? 'female' : 'male';
+    const slot = nextSlot[gender]++;
+    cast.set(name, {
+      cloud: useCloud ? cloudVoiceFor(gender, slot) : null,
+      device: deviceVoiceFor(gender, slot, devicePools[gender], deviceVoices[i % deviceVoices.length]),
+    });
   });
+  return cast;
+}
 
-  const prompter: VoiceChoice = {
+function cloudVoiceFor(gender: VoiceGender, slot: number): string {
+  const pool = gender === 'female' ? FEMALE_VOICES : MALE_VOICES;
+  return pool[slot % pool.length];
+}
+
+/**
+ * The `slot`-th device voice of this gender; once those run out, the same voices repeat at another pitch.
+ * `fallback` is used when no voice of the right gender is installed.
+ */
+function deviceVoiceFor(
+  gender: VoiceGender,
+  slot: number,
+  pool: Speech.Voice[],
+  fallback: Speech.Voice | undefined,
+): VoiceChoice['device'] {
+  if (pool.length) {
+    return { voice: pool[slot % pool.length].identifier, pitch: PITCHES[Math.floor(slot / pool.length) % PITCHES.length] };
+  }
+  // No voice of the right gender installed: nudge the pitch instead.
+  const pitch = gender === 'male' ? 0.85 : 1.1;
+  return fallback ? { voice: fallback.identifier, pitch } : { pitch };
+}
+
+function prompterVoice(deviceVoices: Speech.Voice[], useCloud: boolean): VoiceChoice {
+  return {
     cloud: useCloud ? PROMPTER_VOICE : null,
     device: { voice: deviceVoices[Math.min(1, Math.max(0, deviceVoices.length - 1))]?.identifier, pitch: 1 },
-  };
-  return {
-    forCharacter: (name: string) => map.get(name) ?? { cloud: useCloud ? FEMALE_VOICES[0] : null, device: { pitch: 1 } },
-    prompter,
   };
 }
 
@@ -244,23 +277,12 @@ function playUri(uri: string, timeoutMs: number, token: Cancellation): Promise<v
       return reject(err);
     }
     currentPlayer = player;
-    let settled = false;
-    const finish = (err?: Error) => {
-      if (settled) return;
-      settled = true;
+    const finish = settleOnce(resolve, reject, () => {
       clearTimeout(timer);
       off();
       sub.remove();
-      try {
-        player.pause();
-        player.remove();
-      } catch {
-        // ignore
-      }
-      if (currentPlayer === player) currentPlayer = null;
-      if (err) reject(err);
-      else resolve();
-    };
+      releasePlayer(player);
+    });
     const timer = setTimeout(() => finish(), timeoutMs);
     const off = token.onCancel(() => finish(new CancelledError()));
     const sub = player.addListener('playbackStatusUpdate', (status) => {
@@ -269,6 +291,35 @@ function playUri(uri: string, timeoutMs: number, token: Cancellation): Promise<v
     });
     player.play();
   });
+}
+
+function releasePlayer(player: AudioPlayer) {
+  try {
+    player.pause();
+    player.remove();
+  } catch {
+    // ignore
+  }
+  if (currentPlayer === player) currentPlayer = null;
+}
+
+/**
+ * A `finish(err?)` for a hand-built promise: the first call runs `cleanup`, then rejects with `err`
+ * or resolves; later calls do nothing.
+ */
+function settleOnce(
+  resolve: () => void,
+  reject: (err: unknown) => void,
+  cleanup: () => void,
+): (err?: Error) => void {
+  let settled = false;
+  return (err) => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    if (err) reject(err);
+    else resolve();
+  };
 }
 
 /** Starts downloading upcoming lines so they play without a gap. Never throws. */
@@ -313,49 +364,57 @@ function speakWithDevice(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     if (token.cancelled) return reject(new CancelledError());
-    let settled = false;
-    const finish = (err?: Error) => {
-      if (settled) return;
-      settled = true;
+    const finish = settleOnce(resolve, reject, () => {
       clearTimeout(timer);
       off();
-      if (err) reject(err);
-      else resolve();
-    };
+    });
     const timer = setTimeout(() => {
       console.warn('[tts] speech timed out; continuing');
-      void Speech.stop().catch(() => {});
+      stopDeviceSpeech();
       finish();
     }, timeoutMs);
     const off = token.onCancel(() => {
-      void Speech.stop().catch(() => {});
+      stopDeviceSpeech();
       finish(new CancelledError());
     });
-
-    try {
-      Speech.speak(text, {
-        voice: device.voice,
-        pitch: device.pitch,
-        rate,
-        language: device.voice ? undefined : 'en-US',
-        useApplicationAudioSession: true,
-        onDone: () => finish(),
-        onStopped: () => finish(token.cancelled ? new CancelledError() : undefined),
-        onError: (e) => {
-          // A speech failure shouldn't stop practice; log and move on.
-          console.warn('[tts] speech error', e);
-          finish();
-        },
-      });
-    } catch (err) {
-      console.warn('[tts] speak threw', err);
-      finish();
-    }
+    startDeviceSpeech(text, device, rate, token, finish);
   });
 }
 
-export function stopSpeaking() {
+/** Starts the device voice; `finish` is called when it ends. A speech failure never stops practice. */
+function startDeviceSpeech(
+  text: string,
+  device: VoiceChoice['device'],
+  rate: number,
+  token: Cancellation,
+  finish: (err?: Error) => void,
+) {
+  try {
+    Speech.speak(text, {
+      voice: device.voice,
+      pitch: device.pitch,
+      rate,
+      language: device.voice ? undefined : 'en-US',
+      useApplicationAudioSession: true,
+      onDone: () => finish(),
+      onStopped: () => finish(token.cancelled ? new CancelledError() : undefined),
+      onError: (e) => {
+        console.warn('[tts] speech error', e);
+        finish();
+      },
+    });
+  } catch (err) {
+    console.warn('[tts] speak threw', err);
+    finish();
+  }
+}
+
+function stopDeviceSpeech() {
   void Speech.stop().catch(() => {});
+}
+
+export function stopSpeaking() {
+  stopDeviceSpeech();
   try {
     currentPlayer?.pause();
   } catch {
