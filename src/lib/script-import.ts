@@ -104,6 +104,21 @@ function checkCancelled(token: CancelToken) {
   if (token.cancelled) throw new CancelledError();
 }
 
+/** Retries a network call, but stops as soon as the user cancels (an abort then counts as a cancel). */
+function withCancellableRetry<T>(token: CancelToken, call: (signal?: AbortSignal) => Promise<T>): Promise<T> {
+  return withRetry(
+    () => {
+      checkCancelled(token); // a retry after Cancel stops here
+      return call(token.controller?.signal).catch((err) => {
+        if (token.cancelled) throw new CancelledError();
+        throw err;
+      });
+    },
+    2,
+    1500,
+  );
+}
+
 async function imageToBase64(page: PageImage): Promise<string> {
   try {
     const context = ImageManipulator.manipulate(page.uri);
@@ -118,7 +133,37 @@ async function imageToBase64(page: PageImage): Promise<string> {
   }
 }
 
+async function imagesToBase64(pages: PageImage[], token: CancelToken): Promise<string[]> {
+  const images: string[] = [];
+  for (const page of pages) {
+    checkCancelled(token);
+    images.push(await imageToBase64(page));
+  }
+  return images;
+}
+
+async function readDocumentBase64(doc: PickedDocument): Promise<string> {
+  try {
+    return await readUriAsBase64(doc.uri);
+  } catch (err) {
+    console.warn('[import] read file failed', err);
+    throw new AppError("Couldn't open that file. Try choosing it again.", 'bad_file', false);
+  }
+}
+
 type Accumulator = { title: string | null; lines: ScriptLine[]; genders: Record<string, Gender> };
+
+function emptyAccumulator(): Accumulator {
+  return { title: null, lines: [], genders: {} };
+}
+
+/** Keeps the first woman/man guess for each character; later chunks don't overwrite it. */
+function recordGenders(genders: Record<string, Gender>, characters: { name: string; gender: Gender }[]) {
+  for (const c of characters) {
+    const name = normalizeCharacterName(c.name);
+    if (name && (c.gender === 'female' || c.gender === 'male') && !genders[name]) genders[name] = c.gender;
+  }
+}
 
 async function parseChunk(
   acc: Accumulator,
@@ -129,34 +174,27 @@ async function parseChunk(
 ) {
   checkCancelled(token);
   const last = acc.lines[acc.lines.length - 1];
-  const result = await withRetry(
-    () => {
-      checkCancelled(token); // a retry after Cancel stops here
-      return parseScriptChunk(
-        input,
-        {
-          knownCharacters: uniqueCharacters(acc.lines),
-          lastSpeaker: last?.character ?? null,
-          lastScene: last?.scene ?? null,
-          chunkIndex,
-          chunkCount,
-        },
-        token.controller?.signal,
-      ).catch((err) => {
-        if (token.cancelled) throw new CancelledError();
-        throw err;
-      });
-    },
-    2,
-    1500,
+  const result = await withCancellableRetry(token, (signal) =>
+    parseScriptChunk(
+      input,
+      {
+        knownCharacters: uniqueCharacters(acc.lines),
+        lastSpeaker: last?.character ?? null,
+        lastScene: last?.scene ?? null,
+        chunkIndex,
+        chunkCount,
+      },
+      signal,
+    ),
   );
   checkCancelled(token);
   acc.title = acc.title ?? result.title;
   acc.lines = mergeParsedChunk(acc.lines, result.lines);
-  for (const c of result.characters ?? []) {
-    const name = normalizeCharacterName(c.name);
-    if (name && (c.gender === 'female' || c.gender === 'male') && !acc.genders[name]) acc.genders[name] = c.gender;
-  }
+  recordGenders(acc.genders, result.characters ?? []);
+}
+
+function pageRangeStep(firstPage: number, lastPage: number): string {
+  return firstPage === lastPage ? `Reading page ${firstPage}` : `Reading pages ${firstPage}–${lastPage}`;
 }
 
 export async function importFromPhotos(
@@ -167,23 +205,14 @@ export async function importFromPhotos(
   if (pages.length === 0) throw new AppError('Add at least one page first.', 'empty', false);
   if (pages.length > MAX_PAGES) throw new AppError(`Please use ${MAX_PAGES} pages or fewer.`, 'too_many', false);
 
-  const acc: Accumulator = { title: null, lines: [], genders: {} };
+  const acc = emptyAccumulator();
   const chunkCount = Math.ceil(pages.length / IMAGES_PER_CHUNK);
 
   for (let c = 0; c < chunkCount; c++) {
     const chunk = pages.slice(c * IMAGES_PER_CHUNK, (c + 1) * IMAGES_PER_CHUNK);
     const firstPage = c * IMAGES_PER_CHUNK + 1;
-    const lastPage = firstPage + chunk.length - 1;
-    onProgress({
-      step: firstPage === lastPage ? `Reading page ${firstPage}` : `Reading pages ${firstPage}–${lastPage}`,
-      done: c,
-      total: chunkCount,
-    });
-    const images: string[] = [];
-    for (const page of chunk) {
-      checkCancelled(token);
-      images.push(await imageToBase64(page));
-    }
+    onProgress({ step: pageRangeStep(firstPage, firstPage + chunk.length - 1), done: c, total: chunkCount });
+    const images = await imagesToBase64(chunk, token);
     await parseChunk(acc, { kind: 'images', images }, c, chunkCount, token);
   }
   onProgress({ step: 'Done', done: chunkCount, total: chunkCount });
@@ -196,50 +225,51 @@ export async function importFromDocument(
   token: CancelToken,
 ): Promise<ImportResult> {
   onProgress({ step: 'Opening file', done: 0, total: 1 });
-  let base64: string;
-  try {
-    base64 = await readUriAsBase64(doc.uri);
-  } catch (err) {
-    console.warn('[import] read file failed', err);
-    throw new AppError("Couldn't open that file. Try choosing it again.", 'bad_file', false);
-  }
+  const base64 = await readDocumentBase64(doc);
   checkCancelled(token);
 
-  const extracted = await withRetry(
-    () => {
-      checkCancelled(token);
-      return extractDocumentText(doc.kind, base64, token.controller?.signal).catch((err) => {
-        if (token.cancelled) throw new CancelledError();
-        throw err;
-      });
-    },
-    2,
-    1500,
-  );
+  const extracted = await withCancellableRetry(token, (signal) => extractDocumentText(doc.kind, base64, signal));
   checkCancelled(token);
 
   const pages = extracted.pages.map((p) => p.trim());
   const totalChars = pages.reduce((n, p) => n + p.length, 0);
-  const acc: Accumulator = { title: null, lines: [], genders: {} };
 
   // A PDF with almost no text is a scan: let the AI read the page images directly.
   if (doc.kind === 'pdf' && totalChars < Math.max(200, pages.length * 40)) {
-    onProgress({ step: 'Reading scanned pages', done: 0, total: 1 });
-    await parseChunk(acc, { kind: 'pdf', base64 }, 0, 1, token);
-    onProgress({ step: 'Done', done: 1, total: 1 });
-    return finish(acc, 'pdf');
+    return importScannedPdf(base64, onProgress, token);
   }
   if (totalChars === 0) {
     throw new AppError('That file has no text in it. Try photographing the pages instead.', 'empty', false);
   }
+  return importTextPages(pages, doc.kind, onProgress, token);
+}
 
+async function importScannedPdf(
+  base64: string,
+  onProgress: (p: ImportProgress) => void,
+  token: CancelToken,
+): Promise<ImportResult> {
+  const acc = emptyAccumulator();
+  onProgress({ step: 'Reading scanned pages', done: 0, total: 1 });
+  await parseChunk(acc, { kind: 'pdf', base64 }, 0, 1, token);
+  onProgress({ step: 'Done', done: 1, total: 1 });
+  return finish(acc, 'pdf');
+}
+
+async function importTextPages(
+  pages: string[],
+  source: ScriptSource,
+  onProgress: (p: ImportProgress) => void,
+  token: CancelToken,
+): Promise<ImportResult> {
+  const acc = emptyAccumulator();
   const chunks = chunkText(pages, TEXT_CHARS_PER_CHUNK);
   for (let c = 0; c < chunks.length; c++) {
     onProgress({ step: `Reading part ${c + 1} of ${chunks.length}`, done: c, total: chunks.length });
     await parseChunk(acc, { kind: 'text', text: chunks[c] }, c, chunks.length, token);
   }
   onProgress({ step: 'Done', done: chunks.length, total: chunks.length });
-  return finish(acc, doc.kind);
+  return finish(acc, source);
 }
 
 function finish(acc: Accumulator, source: ScriptSource): ImportResult {
