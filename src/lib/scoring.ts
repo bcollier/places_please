@@ -47,6 +47,20 @@ const SPELLING_EQUIVALENTS: Record<string, string> = {
   gonna: 'going to',
   wanna: 'want to',
   gotta: 'got to',
+  hafta: 'have to',
+  hasta: 'has to',
+  oughta: 'ought to',
+  useta: 'used to',
+  shoulda: 'should have',
+  woulda: 'would have',
+  coulda: 'could have',
+  musta: 'must have',
+  lotta: 'lot of',
+  cuz: 'because',
+  // Words a transcript may join or split either way.
+  anymore: 'any more',
+  alot: 'a lot',
+  awhile: 'a while',
   lemme: 'let me',
   gimme: 'give me',
   kinda: 'kind of',
@@ -66,6 +80,12 @@ const IRREGULAR_CONTRACTIONS: Record<string, string> = {
   "y'all": 'you all',
   "'tis": 'it is',
   "'twas": 'it was',
+  "'cause": 'because',
+  "'cos": 'because',
+  "'em": 'them',
+  "c'mon": 'come on',
+  "y'know": 'you know',
+  "ma'am": 'madam',
 };
 // Words where 's means "is" (or "has"), not a possessive.
 const S_IS = new Set([
@@ -80,7 +100,7 @@ function wordTokens(raw: string): string[] {
     .replace(/[‘’ʼ`]/g, "'")
     .replace(/[^a-z0-9']/g, '')
     .replace(/'+$/g, '');
-  const expanded = expandContraction(w.replace(/^'+(?!tis$|twas$)/, ''));
+  const expanded = expandContraction(w);
   const out: string[] = [];
   for (const part of expanded.split(' ')) {
     const n = normalizeWord(part);
@@ -92,8 +112,9 @@ function wordTokens(raw: string): string[] {
   return out;
 }
 
-function expandContraction(w: string): string {
-  if (IRREGULAR_CONTRACTIONS[w]) return IRREGULAR_CONTRACTIONS[w];
+function expandContraction(word: string): string {
+  if (IRREGULAR_CONTRACTIONS[word]) return IRREGULAR_CONTRACTIONS[word];
+  const w = word.replace(/^'+/, ''); // an opening quote mark, not part of the word
   let m: RegExpMatchArray | null;
   if ((m = w.match(/^(.+)n't$/))) return `${m[1]} not`;
   if ((m = w.match(/^(.+)'re$/))) return `${m[1]} are`;

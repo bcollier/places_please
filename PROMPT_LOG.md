@@ -258,3 +258,19 @@ _(Sent mid-turn.)_
 ## 55. 2026-11-22
 
 > push to github
+
+## 56. 2026-11-22
+
+> put a description in the repo, and add this to https://ben.collier.phd/projects/ similar to other projects
+
+## 57. 2026-11-22
+
+> squash and merge
+
+## 58. 2026-11-22
+
+> [two Run Lines screenshots: "everybody's gotta" with extra words, and "shoulda" / "any more" marked wrong] contractions are still counting as wrong
+
+## 59. 2026-11-22
+
+> push to github

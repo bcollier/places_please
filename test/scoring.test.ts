@@ -45,6 +45,15 @@ test('contractions match the words written out, both ways', () => {
   assert.deepEqual(tokenize("John's hat"), ['johns', 'hat']);
 });
 
+test('informal spellings and split words match what the transcript writes', () => {
+  const line = 'Willy, I shoulda said this to you a long time ago. I don’t want you representing the company any more.';
+  const said = 'Willy I should have said this to you a long time ago I do not want you representing the company anymore';
+  assert.equal(scoreLine(line, said).verdict, 'perfect');
+  assert.equal(scoreLine("Everybody's gotta pull his own weight.", "everybody's got to pull his own weight").verdict, 'perfect');
+  assert.equal(scoreLine("C'mon, tell 'em 'cause I said so.", 'come on tell them because I said so').verdict, 'perfect');
+  assert.equal(scoreLine("'Tis but thy name.", 'it is but thy name').verdict, 'perfect');
+});
+
 test('a contraction shows once in the diff, with its original spelling', () => {
   const r = scoreLine('What’re you doing?', 'what are you doing');
   const shown = r.diff.filter((d) => !d.joined).map((d) => d.word);
