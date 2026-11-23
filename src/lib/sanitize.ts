@@ -10,7 +10,7 @@ export function sanitizeSettings(value: unknown): Settings {
   const v = (value && typeof value === 'object' ? value : {}) as Partial<Record<keyof Settings, unknown>>;
   const rate = Number(v.speechRate);
   return {
-    voiceEngine: v.voiceEngine === 'device' ? 'device' : 'microsoft',
+    voiceEngine: v.voiceEngine === 'device' ? 'device' : 'elevenlabs',
     speechRate: Number.isFinite(rate) && rate >= 0.5 && rate <= 1.5 ? rate : DEFAULT_SETTINGS.speechRate,
     pauseLength: v.pauseLength === 'short' || v.pauseLength === 'long' ? v.pauseLength : 'medium',
     pauseOnMistake: v.pauseOnMistake === 'missed' || v.pauseOnMistake === 'never' ? v.pauseOnMistake : 'all',

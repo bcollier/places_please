@@ -23,7 +23,7 @@ pages, audio  ──────────────────────
 
 - **Script import**: photos are resized on the device and sent in batches of 3 pages. PDF and Word text is extracted on the server and parsed in chunks. A scanned PDF is sent to the model whole.
 - **Line checking**: your recording (16 kHz WAV) is transcribed word for word by the AI. Scoring happens on the device with a word-level edit distance. Perfect means every word matches; close means at least 75% match. Recordings are deleted from the phone right after checking and are never stored.
-- **Voices**: free Microsoft neural voices (the Edge "Read Aloud" service, the same one the Python edge-tts package and Ignatius at Home use), with a woman's or man's voice per character. The AI guesses genders when it reads a script; change them under **Voices** on the script page. The phone fetches each line directly from Microsoft (Microsoft refuses these requests from cloud servers, including Supabase), caches it, and fetches the next lines ahead of time. It's unofficial, so there are fallbacks: the `places-ai` function (Azure AI Speech, if `AZURE_SPEECH_KEY` is set), then the phone's built-in voices. **Settings › Scene partner voices** switches between Microsoft and iPhone voices. In a web browser the free voices can't connect, so it uses the browser's voices.
+- **Voices**: ElevenLabs voices, with a woman's or man's voice per character. The AI guesses genders when it reads a script; change them under **Voices** on the script page. The `places-ai` function holds the ElevenLabs key and logs each line's cost. The app caches each line so it's only paid for once, and fetches the next lines ahead of time. If ElevenLabs fails (no key, no connection, out of credits), the line is spoken with the phone's built-in voice instead. **Settings › Scene partner voices** switches between ElevenLabs and iPhone voices, and **Settings › Sound check** tests each kind of sound.
 - **Screen-off practice**: background audio mode, plus a silent keep-alive loop so iOS doesn't suspend the app between lines.
 
 ## Setup
@@ -55,7 +55,7 @@ npx supabase secrets set --project-ref <project-ref> OPENROUTER_API_KEY=sk-or-..
 npx supabase functions deploy places-ai --project-ref <project-ref>
 ```
 
-**Microsoft voices:** nothing to set up; the app uses the free Edge voices. Optional backup: create an Azure **Speech** resource (Free F0 tier) and add `AZURE_SPEECH_KEY` and `AZURE_SPEECH_REGION` secrets. Voice calls made through the function are logged in `places_ai_calls` with purpose `tts`.
+**ElevenLabs voices:** add an `ELEVENLABS_API_KEY` secret (ElevenLabs › Developers › API keys; it only needs Text to Speech access). Optional: `ELEVENLABS_MODEL` (default `eleven_flash_v2_5`, half a credit per character) and `ELEVENLABS_USD_PER_CREDIT` (default 0.0002; set it to your plan's price so the cost log is right). Voice calls are logged in `places_ai_calls` with purpose `tts`. They count toward the daily AI budget.
 
 `ALLOWED_EMAILS` works like Ignatius at Home's: when it's set, only those signed-in emails can use the AI (script reading and line checking). Guests and other accounts get a "sign in with your email" message. Leave it unset to allow everyone, with only the daily spending caps.
 
@@ -99,23 +99,13 @@ The app keeps data on the device so it survives closing and reopening the app, e
 
 Supabase remains the source of truth (and syncs across devices).
 
-## Voices in the web version
-
-Browsers can't connect to Microsoft's free voices directly. For the web build, run the local voice helper next to the dev server:
-
-```bash
-npm run voices        # in a second terminal, next to `npx expo start`
-```
-
-Without it the browser uses its own voices. The iPhone app doesn't need it.
-
 ## AI cost logging
 
 Every paid AI call goes through a ledger in `public.places_ai_calls`:
 
 1. **Before sending**, `places_begin_ai_call` (a Postgres function) checks the daily spend caps and inserts a row with `status = 'pending'` and an estimated cost, in one transaction under an advisory lock, so simultaneous requests can't race past the caps. If that row can't be written, the call is not sent.
 2. **After the reply**, the row is completed: status, model used, tokens, latency, and OpenRouter's reported `usage.cost` (`cost_is_estimate = false`).
-3. If the function stops mid-call, the row stays `pending` with its estimate, so nothing that was sent goes unrecorded. Timeouts keep the estimate too, because the provider may still bill them. Azure TTS (optional backup) is always a list-price estimate, flagged with `cost_is_estimate = true`.
+3. If the function stops mid-call, the row stays `pending` with its estimate, so nothing that was sent goes unrecorded. Timeouts keep the estimate too, because the provider may still bill them. ElevenLabs bills in credits whose price depends on the plan, so voice costs are credits used × `ELEVENLABS_USD_PER_CREDIT`, flagged with `cost_is_estimate = true`.
 
 Only the edge function can write this table; users can read their own rows, and **Settings › AI usage** shows the 30-day total.
 

@@ -35,6 +35,24 @@ test('digits and number words, ok/okay, and dashes are treated as the same words
   assert.deepEqual(tokenize('well-known'), ['well', 'known']);
 });
 
+test('contractions match the words written out, both ways', () => {
+  const line = 'What happened? What’re you doing here?';
+  assert.equal(scoreLine(line, 'What happened? What are you doing here?').verdict, 'perfect');
+  assert.equal(scoreLine(line, "what happened what're you doing here").verdict, 'perfect');
+  assert.equal(scoreLine("I don't know, I can't. It's gonna rain.", 'I do not know I cannot it is going to rain').verdict, 'perfect');
+  assert.equal(scoreLine('We’ll go. I’m sure you’ve seen it.', 'we will go I am sure you have seen it').verdict, 'perfect');
+  // Possessives aren't expanded.
+  assert.deepEqual(tokenize("John's hat"), ['johns', 'hat']);
+});
+
+test('a contraction shows once in the diff, with its original spelling', () => {
+  const r = scoreLine('What’re you doing?', 'what are you doing');
+  const shown = r.diff.filter((d) => !d.joined).map((d) => d.word);
+  assert.deepEqual(shown, ['What’re', 'you', 'doing?']);
+  const wrong = scoreLine('What’re you doing?', 'what were you doing').diff.find((d) => d.kind === 'wrong');
+  assert.equal(wrong?.said, 'were');
+});
+
 test('extra words lower accuracy', () => {
   const r = scoreLine('Are you fair?', 'um are you really fair');
   assert.notEqual(r.verdict, 'perfect');

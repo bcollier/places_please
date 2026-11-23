@@ -160,6 +160,14 @@ export default function HomeScreen() {
             <Icon name="chevron.right" size={14} color={theme.textTertiary} />
           </Card>
         ) : null}
+
+        <Card onPress={() => router.push('/settings')} accessibilityLabel="Settings and sound check" style={styles.historyRow}>
+          <Icon name="gearshape" size={20} color={theme.primary} />
+          <Text variant="heading" style={styles.flex}>
+            Settings & sound check
+          </Text>
+          <Icon name="chevron.right" size={14} color={theme.textTertiary} />
+        </Card>
       </View>
     </ScrollView>
   );

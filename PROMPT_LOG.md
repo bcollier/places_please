@@ -194,3 +194,51 @@ _(Sent mid-turn.)_
 ## 39. 2026-11-22
 
 > merge to main
+
+## 40. 2026-11-22
+
+> [screenshot of the app in macOS iPhone Mirroring, Run Lines listening, with the system alert "iPhone microphone is not available from Mac."] I can't demo on mac
+
+## 41. 2026-11-22
+
+> will the audio be captured
+
+## 42. 2026-11-22
+
+> again i'm on the listening page and not hearing any sound on iphone
+
+## 43. 2026-11-22
+
+> I'm on my phone, the sounds is not coming out at all
+
+## 44. 2026-11-22
+
+> is the settings the littl icone on the top right? the icon for EXPO is in the way and I can't tap the settings button
+
+## 45. 2026-11-22
+
+> Micorosoft voice timed out
+
+## 46. 2026-11-22
+
+> the voice still doesn't make audio in either the run lines or Listen mode. use elevenlabs instead, I can add an API key to supabase
+
+## 47. 2026-11-22
+
+> I can't get the audio to be recorded for the video
+
+## 48. 2026-11-22
+
+> that doesn't work, why would I want to record teh camera of my iphone (screenshot of the QuickTime source menu)
+
+## 49. 2026-11-22
+
+> this is about the 10th thing you are doing that is just bullshit, half of the things you told me to click don't exist, I fucking hat e looking for menus that you tell me to click that do not exist if you don't know what you are talking about FUCKING SAY SO and just say I don't know,m becuase you have me running in circles and none of tyour suggestions are helpful
+
+## 50. 2026-11-22
+
+> even if I perfectly say what're you doing here it always says wrong (two screenshots of Run Lines marking the line Missed)
+
+## 51. 2026-11-22
+
+> push to github, make the commit say bug fixes and visual polish

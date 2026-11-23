@@ -44,8 +44,7 @@
     "@types/react": "~19.3.0",
     "eslint": "^9.0.0",
     "eslint-config-expo": "~58.0.4",
-    "typescript": "~6.0.3",
-    "ws": "^8.18.3"
+    "typescript": "~6.0.3"
   },
   "scripts": {
     "start": "expo start",
@@ -54,7 +53,6 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "expo lint",
-    "voices": "node --experimental-strip-types --no-warnings scripts/tts-proxy.mts",
     "test": "node --experimental-strip-types --no-warnings --import ./test/register.mjs --test test/*.test.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test"
   },

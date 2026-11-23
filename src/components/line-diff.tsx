@@ -11,6 +11,8 @@ export function LineDiff({ diff }: { diff: DiffToken[] }) {
     <Text variant="script" style={styles.text}>
       {diff.map((t, i) => {
         const space = i === 0 ? '' : ' ';
+        // "are" from "What're" is already shown as part of "What're".
+        if (t.kind === 'ok' && t.joined) return null;
         if (t.kind === 'ok') return <Text key={i} variant="script">{space + t.word}</Text>;
         if (t.kind === 'missing') {
           return (

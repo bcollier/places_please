@@ -16,6 +16,8 @@ let keepAlive: AudioPlayer | null = null;
 
 export async function configureAudioSession(kind: Exclude<SessionKind, 'idle'>) {
   if (current === kind) return;
+  // expo-audio ignores every play() while audio is switched off, so always make sure it's on.
+  await setIsAudioActiveAsync(true);
   await setAudioModeAsync({
     playsInSilentMode: true,
     shouldPlayInBackground: true,
@@ -48,7 +50,12 @@ export function stopKeepAlive() {
   }
 }
 
-/** Ends the practice session and lets other apps' audio (music, podcasts) resume. */
+/**
+ * Ends the practice session and lets other apps' audio (music, podcasts) play alongside again.
+ *
+ * Don't call setIsAudioActiveAsync(false) here: in expo-audio that switches playback off for the
+ * whole app until it's switched back on, which silenced every later voice preview and session.
+ */
 export async function releaseAudioSession() {
   stopKeepAlive();
   if (current === 'idle') return;
@@ -61,7 +68,6 @@ export async function releaseAudioSession() {
       allowsBackgroundRecording: false,
       interruptionMode: 'mixWithOthers',
     });
-    await setIsAudioActiveAsync(false);
   } catch (err) {
     console.warn('[audio] release failed', err);
   }

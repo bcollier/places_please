@@ -39,7 +39,7 @@ async function invoke<T>(body: Record<string, unknown>, timeoutMs: number, signa
         message = "The AI service isn't deployed yet. Deploy the `places-ai` edge function (see README).";
       }
       // Limits and bad input won't fix themselves by retrying.
-      const retryable = !(code === 'daily_limit' || code === 'not_allowed' || code === 'tts_not_configured' || code === 'bad_request' || code === 'too_large' || code === 'unreadable_file' || status === 404);
+      const retryable = !(code === 'daily_limit' || code === 'not_allowed' || code === 'tts_not_configured' || code === 'tts_quota' || code === 'voice_unavailable' || code === 'bad_request' || code === 'too_large' || code === 'unreadable_file' || status === 404);
       throw new AppError(message, code, retryable);
     }
     if (error instanceof FunctionsFetchError || error instanceof FunctionsRelayError) {
@@ -81,9 +81,9 @@ export function guessGenders(characters: { name: string; sample: string }[]) {
   );
 }
 
-/** Microsoft neural voice for one line; returns base64 MP3. */
+/** ElevenLabs voice for one line; returns base64 MP3. Short timeout: the phone voice takes over if it's slow. */
 export function synthesizeSpeech(text: string, voice: string, rate: number) {
-  return invoke<SpeakResult>({ action: 'speak', text, voice, rate }, 25_000);
+  return invoke<SpeakResult>({ action: 'speak', text, voice, rate }, 12_000);
 }
 
 export function transcribeAudio(base64: string, format: 'wav' | 'm4a', vocabulary: string[]) {

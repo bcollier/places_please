@@ -9,7 +9,7 @@ export type ScriptSource = 'photos' | 'pdf' | 'docx' | 'text';
 
 export type Gender = 'female' | 'male' | 'unknown';
 
-export type VoiceEngine = 'microsoft' | 'device';
+export type VoiceEngine = 'elevenlabs' | 'device';
 
 export type Script = {
   id: string;
@@ -78,7 +78,7 @@ export type Settings = {
 };
 
 export const DEFAULT_SETTINGS: Settings = {
-  voiceEngine: 'microsoft',
+  voiceEngine: 'elevenlabs',
   speechRate: 1,
   pauseLength: 'medium',
   pauseOnMistake: 'all',

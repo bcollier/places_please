@@ -14,7 +14,7 @@ test('out-of-range and unknown values are replaced', () => {
   assert.equal(s.speechRate, DEFAULT_SETTINGS.speechRate);
   assert.equal(s.pauseLength, 'medium');
   assert.equal(s.pauseOnMistake, 'all');
-  assert.equal(s.voiceEngine, 'microsoft');
+  assert.equal(s.voiceEngine, 'elevenlabs');
   assert.equal(s.cueSound, DEFAULT_SETTINGS.cueSound);
 });
 

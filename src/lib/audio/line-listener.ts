@@ -161,7 +161,8 @@ export async function listenForLine(
     try {
       await recorder.stop();
     } catch (err) {
-      console.warn('[listen] stop failed', err);
+      // Leaving the screen mid-line releases the recorder first; nothing left to stop.
+      if (!/shared object/i.test(String(err))) console.warn('[listen] stop failed', err);
     }
   }
 

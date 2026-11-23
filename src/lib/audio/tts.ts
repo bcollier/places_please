@@ -5,7 +5,6 @@ import { Platform } from 'react-native';
 
 import { synthesizeSpeech } from '@/lib/ai';
 import { Cancellation } from '@/lib/audio/cancel';
-import { bytesToBase64, edgeSynthesize } from '@/lib/audio/edge-tts';
 import { AppError, CancelledError } from '@/lib/errors';
 import { countWords } from '@/lib/script-model';
 import type { Gender, VoiceEngine } from '@/lib/types';
@@ -13,14 +12,14 @@ import type { Gender, VoiceEngine } from '@/lib/types';
 /**
  * Scene-partner voices.
  *
- * - Microsoft neural voices (free Edge Read Aloud voices, through the places-ai edge function):
+ * - ElevenLabs voices (through the places-ai edge function, which holds the key and logs the cost):
  *   natural male and female voices. Each line is downloaded once and cached; the next lines are fetched ahead of time.
- * - The device's built-in voices: offline fallback. If Microsoft voices fail for any reason, the line
+ * - The device's built-in voices: offline fallback. If ElevenLabs fails for any reason, the line
  *   is spoken with the device voice instead, so a rehearsal never stops.
  */
 
 export type VoiceChoice = {
-  /** Azure voice name, or null to use the device voice. */
+  /** ElevenLabs voice ID, or null to use the device voice. */
   cloud: string | null;
   device: { voice?: string; pitch: number };
 };
@@ -30,27 +29,26 @@ export type VoiceCast = {
   prompter: VoiceChoice;
 };
 
-// Microsoft neural voices available free through Edge Read Aloud, most natural and reliable first.
+// ElevenLabs default voices (available on every account), most natural first.
 export const FEMALE_VOICES = [
-  'en-US-AvaMultilingualNeural',
-  'en-US-EmmaMultilingualNeural',
-  'en-US-JennyNeural',
-  'en-US-AriaNeural',
-  'en-US-MichelleNeural',
-  'en-GB-LibbyNeural',
-  'en-GB-SoniaNeural',
+  'EXAVITQu4vr4xnSDxMaL', // Sarah
+  'FGY2WhTYpPnrIDTdsKH5', // Laura
+  'cgSgspJ2msm6clMCkdW9', // Jessica
+  'XrExE9yKIg1WjnnlVkGX', // Matilda
+  'Xb7hH8MSUJpSbSDYk0k2', // Alice (British)
+  'pFZP5JQG7iQjIQuC4Bku', // Lily (British)
 ];
 export const MALE_VOICES = [
-  'en-US-BrianMultilingualNeural',
-  'en-US-AndrewMultilingualNeural',
-  'en-US-GuyNeural',
-  'en-US-ChristopherNeural',
-  'en-GB-RyanNeural',
-  'en-US-EricNeural',
-  'en-US-RogerNeural',
-  'en-GB-ThomasNeural',
+  'JBFqnCBsd6RMkjVDRZzb', // George (British)
+  'nPczCjzI2devNBz1zQrb', // Brian
+  'cjVigY5qzO86Huf0OWal', // Eric
+  'iP95p4xoKVk53GoZ742B', // Chris
+  'TX3LPaxmHKxFdv7VOQHJ', // Liam
+  'onwK4e9ZLuTAKqWW03F9', // Daniel (British)
+  'bIHbv24MWmeRgasZH58o', // Will
+  'N2lVS1w4EtoT3dr4eOWO', // Callum
 ];
-const PROMPTER_VOICE = 'en-US-JennyNeural';
+const PROMPTER_VOICE = 'EXAVITQu4vr4xnSDxMaL';
 
 // ---------------------------------------------------------------------------
 // Device voices
@@ -124,9 +122,7 @@ export async function castVoices(options: {
   const deviceVoices = await getVoices();
   const femaleDevice = deviceVoices.filter((v) => deviceVoiceGender(v) === 'female');
   const maleDevice = deviceVoices.filter((v) => deviceVoiceGender(v) === 'male');
-  // Free Microsoft voices need a connection only the phone app (or, in a browser, the local voice
-  // helper) can make; otherwise use the browser's or phone's own voices.
-  const useCloud = engine === 'microsoft' && (Platform.OS !== 'web' || (await voiceHelperAvailable()));
+  const useCloud = engine === 'elevenlabs';
   const order = [...characters.filter((c) => c !== me), ...(me && characters.includes(me) ? [me] : [])];
 
   const map = new Map<string, VoiceChoice>();
@@ -162,85 +158,31 @@ export async function castVoices(options: {
 }
 
 // ---------------------------------------------------------------------------
-// Microsoft voices: fetch, cache, play
+// ElevenLabs voices: fetch, cache, play
 // ---------------------------------------------------------------------------
 
-/** Set when Microsoft voices can't work this session (not allowed, or failing repeatedly). */
+/** Set when ElevenLabs can't work this session (no key, not allowed, out of credits or budget). */
 let cloudDisabled = false;
-let consecutiveFailures = 0;
+/** After a failure, skip ElevenLabs until this time so lines aren't left silent while we wait. */
+let cloudPausedUntil = 0;
+const CLOUD_PAUSE_MS = 2 * 60_000;
+const cloudOff = () => cloudDisabled || Date.now() < cloudPausedUntil;
+const PERMANENT_FAILURES = new Set(['tts_not_configured', 'not_allowed', 'tts_quota', 'daily_limit']);
 
-/**
- * Microsoft's service sometimes stalls on one particular voice. Before giving up on a line, try the
- * next voice of the same gender, so the scene keeps its natural voices instead of going silent.
- */
+/** If a voice was retired by ElevenLabs, try the next voice of the same gender. */
 async function fetchWithAlternate(text: string, voice: string, rate: number): Promise<string> {
   try {
-    return await fetchAudioBase64(text, voice, rate);
+    return (await synthesizeSpeech(text, voice, rate)).audio;
   } catch (err) {
+    if (!(err instanceof AppError && err.code === 'voice_unavailable')) throw err;
     const pool = FEMALE_VOICES.includes(voice) ? FEMALE_VOICES : MALE_VOICES.includes(voice) ? MALE_VOICES : null;
     if (!pool) throw err;
     const alternate = pool[(pool.indexOf(voice) + 1) % pool.length];
-    console.warn(`[tts] ${voice} failed; trying ${alternate}`);
-    return fetchAudioBase64(text, alternate, rate);
+    console.warn(`[tts] voice ${voice} unavailable; trying ${alternate}`);
+    return (await synthesizeSpeech(text, alternate, rate)).audio;
   }
 }
 
-// Web only: the local voice helper (`npm run voices`) fetches Microsoft voices for the browser.
-const VOICE_HELPER_URL = 'http://localhost:8790';
-let helperCheck: Promise<boolean> | null = null;
-
-function voiceHelperAvailable(): Promise<boolean> {
-  if (Platform.OS !== 'web') return Promise.resolve(false);
-  const host = globalThis.location?.hostname ?? '';
-  if (host !== 'localhost' && host !== '127.0.0.1') return Promise.resolve(false);
-  if (!helperCheck) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 800);
-    helperCheck = fetch(`${VOICE_HELPER_URL}/health`, { signal: controller.signal })
-      .then((r) => r.ok)
-      .catch(() => false)
-      .finally(() => clearTimeout(timer));
-  }
-  return helperCheck;
-}
-
-async function fetchFromVoiceHelper(text: string, voice: string, rate: number): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 14_000); // helper: 2 tries x 6 s
-  try {
-    const res = await fetch(`${VOICE_HELPER_URL}/tts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, voice, rate }),
-      signal: controller.signal,
-    });
-    const body = (await res.json()) as { audio?: string };
-    if (!res.ok || !body.audio) throw new Error(`voice helper HTTP ${res.status}`);
-    return body.audio;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-/**
- * Gets MP3 audio as base64: straight from Microsoft on the phone (free Edge voices; refused from
- * cloud servers); in a browser through the local voice helper; otherwise through the places-ai
- * function (Azure backup).
- */
-async function fetchAudioBase64(text: string, voice: string, rate: number): Promise<string> {
-  if (Platform.OS === 'web') return fetchFromVoiceHelper(text, voice, rate);
-  try {
-    return bytesToBase64(await edgeSynthesize(text, voice, rate));
-  } catch (err) {
-    try {
-      return bytesToBase64(await edgeSynthesize(text, voice, rate)); // one retry
-    } catch {
-      console.warn('[tts] Edge voice failed on device; trying the server', err);
-    }
-  }
-  const { audio } = await synthesizeSpeech(text, voice, rate);
-  return audio;
-}
 const audioCache = new Map<string, Promise<string>>();
 
 function hash(s: string) {
@@ -249,12 +191,13 @@ function hash(s: string) {
   return (h >>> 0).toString(36);
 }
 
+/** Each line is downloaded once: kept in memory and, on the phone, in the cache folder (no repeat charges). */
 function cloudAudioUri(text: string, voice: string, rate: number): Promise<string> {
   const key = `${voice}|${rate}|${text}`;
   const cached = audioCache.get(key);
   if (cached) return cached;
   const promise = (async () => {
-    const name = `tts-${hash(key)}-${text.length}.mp3`;
+    const name = `el-${hash(key)}-${text.length}.mp3`;
     if (Platform.OS !== 'web') {
       const file = new File(Paths.cache, name);
       if (file.exists) return file.uri;
@@ -267,23 +210,26 @@ function cloudAudioUri(text: string, voice: string, rate: number): Promise<strin
     return `data:audio/mpeg;base64,${audio}`;
   })();
   audioCache.set(key, promise);
-  promise.then(
-    () => {
-      consecutiveFailures = 0;
-    },
-    (err) => {
-      audioCache.delete(key);
-      consecutiveFailures++;
-      // Stop waiting on Microsoft for the rest of the session if it clearly isn't working.
-      if (
-        consecutiveFailures >= 3 ||
-        (err instanceof AppError && (err.code === 'tts_not_configured' || err.code === 'not_allowed'))
-      ) {
-        cloudDisabled = true;
-      }
-    },
-  );
+  promise.catch((err) => {
+    audioCache.delete(key);
+    console.warn('[tts] ElevenLabs voice failed; using the phone voice.', err instanceof Error ? err.message : err);
+    if (err instanceof AppError && PERMANENT_FAILURES.has(err.code)) cloudDisabled = true;
+    else cloudPausedUntil = Date.now() + CLOUD_PAUSE_MS;
+  });
   return promise;
+}
+
+/** Why ElevenLabs voices are off right now, or null when they're on. For the sound check. */
+export function cloudVoiceStatus(): string | null {
+  if (cloudDisabled) return 'turned off for this session after an error';
+  if (Date.now() < cloudPausedUntil) return 'paused for a couple of minutes after an error';
+  return null;
+}
+
+/** Lets the sound check try ElevenLabs again right away. */
+export function resetCloudVoices() {
+  cloudDisabled = false;
+  cloudPausedUntil = 0;
 }
 
 let currentPlayer: AudioPlayer | null = null;
@@ -327,7 +273,7 @@ function playUri(uri: string, timeoutMs: number, token: Cancellation): Promise<v
 
 /** Starts downloading upcoming lines so they play without a gap. Never throws. */
 export function prefetchSpeech(text: string, choice: VoiceChoice, rate: number) {
-  if (!choice.cloud || cloudDisabled || !text.trim()) return;
+  if (!choice.cloud || cloudOff() || !text.trim()) return;
   cloudAudioUri(text, choice.cloud, rate).catch(() => {});
 }
 
@@ -337,14 +283,14 @@ export function prefetchSpeech(text: string, choice: VoiceChoice, rate: number) 
 
 /**
  * Speaks text and resolves when finished. Rejects only with CancelledError.
- * Microsoft voice first (when chosen); any failure falls back to the device voice.
+ * ElevenLabs voice first (when chosen); any failure falls back to the device voice.
  */
 export async function speak(text: string, choice: VoiceChoice, rate: number, token: Cancellation): Promise<void> {
   token.throwIfCancelled();
   const words = countWords(text);
   const timeoutMs = 6000 + (words / Math.max(0.5, rate)) * 700;
 
-  if (choice.cloud && !cloudDisabled) {
+  if (choice.cloud && !cloudOff()) {
     try {
       const uri = await cloudAudioUri(text, choice.cloud, rate);
       token.throwIfCancelled();
@@ -352,7 +298,7 @@ export async function speak(text: string, choice: VoiceChoice, rate: number, tok
       return;
     } catch (err) {
       if (err instanceof CancelledError) throw err;
-      console.warn('[tts] Microsoft voice failed; using device voice', err);
+      console.warn('[tts] cloud voice failed; using device voice', err);
     }
   }
   return speakWithDevice(text, choice.device, rate, timeoutMs, token);

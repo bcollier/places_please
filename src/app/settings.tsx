@@ -11,6 +11,7 @@ import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { getAiUsageSummary } from '@/lib/api';
 import { Cancellation } from '@/lib/audio/cancel';
+import { runSoundCheck, type CheckStep } from '@/lib/audio/sound-check';
 import { castVoices, getVoices, speak, stopSpeaking } from '@/lib/audio/tts';
 import { showAlert } from '@/lib/dialogs';
 import { toUserMessage } from '@/lib/errors';
@@ -43,6 +44,19 @@ export default function SettingsScreen() {
   const [usage, setUsage] = useState<AiUsageSummary | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
   const [voiceCount, setVoiceCount] = useState<number | null>(null);
+  const [checkSteps, setCheckSteps] = useState<CheckStep[]>([]);
+  const [checking, setChecking] = useState(false);
+
+  const soundCheck = async () => {
+    stopSpeaking();
+    setChecking(true);
+    setCheckSteps([]);
+    try {
+      await runSoundCheck(setCheckSteps);
+    } finally {
+      setChecking(false);
+    }
+  };
 
   useEffect(() => {
     getAiUsageSummary()
@@ -99,11 +113,11 @@ export default function SettingsScreen() {
           title="Scene partner voices"
           subtitle={
             Platform.OS === 'web'
-              ? 'Microsoft voices play in the iPhone app. In a browser, your browser’s voices are used.'
-              : 'Microsoft voices sound natural and need an internet connection. iPhone voices work offline.'
+              ? 'ElevenLabs voices sound natural and need an internet connection. Browser voices work offline.'
+              : 'ElevenLabs voices sound natural and need an internet connection. iPhone voices work offline.'
           }>
           <View style={styles.chips}>
-            <Chip label="Microsoft" detail="Natural" selected={settings.voiceEngine === 'microsoft'} onPress={() => set({ voiceEngine: 'microsoft' })} />
+            <Chip label="ElevenLabs" detail="Natural" selected={settings.voiceEngine === 'elevenlabs'} onPress={() => set({ voiceEngine: 'elevenlabs' })} />
             <Chip label="iPhone" detail="Offline" selected={settings.voiceEngine === 'device'} onPress={() => set({ voiceEngine: 'device' })} />
           </View>
           <View style={styles.chips}>
@@ -158,6 +172,23 @@ export default function SettingsScreen() {
             value={settings.listenReadsMyLines}
             onChange={(v) => set({ listenReadsMyLines: v })}
           />
+        </Section>
+
+        <Section title="Sound check" subtitle="Hearing nothing? This plays each kind of sound the app uses and shows what happened.">
+          <Button title={checking ? 'Checking…' : 'Run sound check'} icon="speaker.wave.2.fill" variant="secondary" size="medium" loading={checking} onPress={() => void soundCheck()} />
+          {checkSteps.map((step) => (
+            <View key={step.label} style={styles.checkRow}>
+              <Icon
+                name={step.ok === null ? 'clock' : step.ok ? 'checkmark.circle.fill' : 'xmark.circle.fill'}
+                size={18}
+                color={step.ok === null ? theme.textSecondary : step.ok ? theme.perfect : theme.miss}
+              />
+              <View style={styles.flex}>
+                <Text variant="bodyStrong">{step.label}</Text>
+                <Text variant="caption">{step.detail}</Text>
+              </View>
+            </View>
+          ))}
         </Section>
 
         <Section title="AI usage" subtitle="Every AI call is logged with its cost. Last 30 days.">
@@ -224,5 +255,6 @@ const styles = StyleSheet.create({
   usageRow: { flexDirection: 'row', gap: Spacing.three },
   usage: { flex: 1, gap: 2 },
   footer: { textAlign: 'center', marginTop: Spacing.four },
+  checkRow: { flexDirection: 'row', gap: Spacing.three, alignItems: 'flex-start' },
   accountRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.three, padding: 0, borderWidth: 0 },
 });
